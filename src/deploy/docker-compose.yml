@@ -1,0 +1,31 @@
+# ============================================
+#   🐱 小南专属TGbot - Docker Compose 部署
+#   一行命令启动机器人！
+#   使用: docker compose up -d
+# ============================================
+
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: xiaonan-tgbot
+    restart: unless-stopped
+    volumes:
+      # 持久化数据
+      - ./data:/app/data
+      # 挂载配置文件（方便修改）
+      - ../config.py:/app/config.py
+    environment:
+      - TZ=Asia/Shanghai
+    # 如果需要 Webhook 模式，取消下面注释
+    # ports:
+    #   - "8080:8080"
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

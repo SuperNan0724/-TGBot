@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "message": "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+      "update_id": null,
+      "user_id": null,
+      "timestamp": "2026-05-18T00:18:41.445500"
+    }
+  ]
+}
