@@ -36,6 +36,15 @@ python start.py
 | `BOT_OWNER_ID` | 你的 Telegram ID | ✅ |
 | `BOT_NAME` | 机器人名称 | ❌ |
 
+> ⚠️ **关于网络连接**
+>
+> 由于 Telegram API 在国内无法直接访问，你需要：
+> - **方案一**：使用代理软件（如 Clash、v2ray、SSR 等），开启系统代理或 TUN 模式
+> - **方案二**：在服务器上部署（海外服务器无需代理）
+> - **方案三**：使用 Docker 部署并配置容器代理
+>
+> 本项目不内置代理功能，请自行确保网络环境可以访问 Telegram API。
+
 ## 🐳 Docker 部署
 
 ```bash
