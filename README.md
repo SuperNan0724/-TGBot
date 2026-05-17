@@ -76,40 +76,75 @@ dice - 掷骰子喵～
 rps - 猜拳喵～
 ```
 
+## 🔄 源码同步（调试 & 上传）
+
+项目包含两个源码目录，方便你一边调试一边上传：
+
+| 目录 | 用途 | 配置 |
+|------|------|------|
+| `src/` | **调试目录** - 本地运行调试 | 包含你的 Token/Key/ID |
+| `source/` | **源码目录** - 上传到 GitHub 等 | 不含配置信息（模板配置） |
+
+### 一键同步
+
+```bash
+# 调试完上传源码（src → source）
+python sync.py toSource
+
+# 下载源码后调试（source → src）
+python sync.py toSrc
+
+# 双向同步
+python sync.py
+```
+
+> 💡 `config.py` 和 `data/` 目录不会被同步，各自独立配置~
+
 ## 📁 项目结构
 
 ```
 小南专属TGbot/
 ├── README.md               ← 项目说明（从这里开始看！）
 ├── start.py                ← 跨平台启动器（唯一入口）
+├── sync.py                 ← 一键同步脚本（调试 & 上传）
 ├── .dockerignore           ← Docker 忽略文件
-└── src/                    ← 所有源文件
-    ├── main.py             ← 主程序入口
-    ├── config.py           ← 配置文件（填入你的 Token/Key/ID）
-    ├── requirements.txt    ← Python 依赖
-    ├── modules/            ← 模块目录
-    │   ├── __init__.py
-    │   ├── base_module.py      # 模块基类
-    │   ├── module_loader.py    # 模块加载器
-    │   ├── data_manager.py     # 数据管理器
-    │   ├── deepseek_chat.py    # AI 对话模块
-    │   ├── admin.py            # 管理模块
-    │   ├── help.py             # 帮助模块
-    │   ├── system.py           # 系统状态模块
-    │   ├── fun.py              # 娱乐模块
-    │   └── anime_logger.py     # 二次元日志模块
-    ├── data/              ← 数据文件（自动生成）
-    │   ├── whitelist.json
-    │   ├── admins.json
-    │   ├── user_data.json
-    │   ├── errors.json
-    │   └── backups/
-    └── deploy/            ← 部署文件
-        ├── Dockerfile
-        ├── docker-compose.yml
-        ├── setup.bat
-        ├── setup.sh
-        └── commands.txt
+├── src/                    ← 调试目录（含配置信息）
+│   ├── main.py             ← 主程序入口
+│   ├── config.py           ← 配置文件（填入你的 Token/Key/ID）
+│   ├── requirements.txt    ← Python 依赖
+│   ├── modules/            ← 模块目录
+│   │   ├── __init__.py
+│   │   ├── base_module.py      # 模块基类
+│   │   ├── module_loader.py    # 模块加载器
+│   │   ├── data_manager.py     # 数据管理器
+│   │   ├── deepseek_chat.py    # AI 对话模块
+│   │   ├── admin.py            # 管理模块
+│   │   ├── help.py             # 帮助模块
+│   │   ├── system.py           # 系统状态模块
+│   │   ├── fun.py              # 娱乐模块
+│   │   └── anime_logger.py     # 二次元日志模块
+│   ├── data/              ← 数据文件（自动生成）
+│   │   ├── whitelist.json
+│   │   ├── admins.json
+│   │   ├── user_data.json
+│   │   ├── errors.json
+│   │   └── backups/
+│   └── deploy/            ← 部署文件
+│       ├── Dockerfile
+│       ├── docker-compose.yml
+│       ├── setup.bat
+│       ├── setup.sh
+│       └── commands.txt
+└── source/                ← 源码目录（上传用，不含配置）
+    ├── start.py
+    ├── README.md
+    ├── .dockerignore
+    └── src/
+        ├── main.py
+        ├── config.py          ← 模板配置（无 Token/Key/ID）
+        ├── requirements.txt
+        ├── modules/
+        └── deploy/
 ```
 
 ## 💡 小贴士

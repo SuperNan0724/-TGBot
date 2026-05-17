@@ -272,6 +272,54 @@ def install_dependencies():
         return False
 
 
+def kill_old_bot():
+    """一次性杀掉所有旧机器人进程，防止 Conflict 冲突~"""
+    system = platform.system()
+    
+    if system == "Windows":
+        # Windows：用 wmic 查所有 python 进程，逐个杀掉
+        try:
+            # 方法1：taskkill 杀所有 python.exe
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "python.exe"],
+                capture_output=True, text=True, timeout=5
+            )
+        except:
+            pass
+        try:
+            # 方法2：taskkill 杀所有 pythonw.exe（后台进程）
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "pythonw.exe"],
+                capture_output=True, text=True, timeout=5
+            )
+        except:
+            pass
+        try:
+            # 方法3：用 wmic 查所有含 main.py 的进程
+            result = subprocess.run(
+                ["wmic", "process", "where", 'name="python.exe"', "get", "processid"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.split("\n"):
+                pid = line.strip()
+                if pid.isdigit():
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", pid],
+                        capture_output=True, text=True, timeout=3
+                    )
+        except:
+            pass
+    else:
+        # Linux/macOS：用 pkill 杀所有 python 进程
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", "python"],
+                capture_output=True, text=True, timeout=5
+            )
+        except:
+            pass
+
+
 def run_bot():
     """启动机器人"""
     root = get_project_root()
@@ -283,6 +331,10 @@ def run_bot():
         os.chdir(src_dir)
     else:
         main_path = os.path.join(root, "main.py")
+    
+    # 启动前先杀掉旧进程，防止 Conflict 冲突
+    print(f"\n{Colors.YELLOW}🧹 正在清理旧进程...{Colors.RESET}")
+    kill_old_bot()
     
     print(f"\n{Colors.PINK}🚀 正在启动机器人...{Colors.RESET}\n")
     
