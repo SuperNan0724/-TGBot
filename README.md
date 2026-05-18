@@ -44,7 +44,9 @@ python start.py
 | `TELEGRAM_BOT_TOKEN` | 从 @BotFather 获取的 Token | ✅ |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key | ❌ |
 | `BOT_OWNER_ID` | 你的 Telegram ID | ✅ |
-| `BOT_NAME` | 机器人名称 | ❌ |
+| `BOT_NAME` | 机器人全称 | ❌ |
+| `BOT_NAME_SHORT` | 机器人简称（对话中显示的名字） | ❌ |
+| `DEFAULT_PERSONALITY` | 默认性格 ID | ❌ |
 
 > ⚠️ **关于网络连接**
 >
