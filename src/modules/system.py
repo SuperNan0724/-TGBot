@@ -8,7 +8,7 @@ import psutil
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from config import BOT_NAME
+from config import BOT_NAME, BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
 

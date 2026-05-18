@@ -12,9 +12,11 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 # 机器人配置
-BOT_NAME = "小南专属TGbot"
-BOT_OWNER_NAME = "主人"  # 主人的名字（会显示在欢迎消息等地方哦~）
-BOT_OWNER_ID = None  # 主人的 Telegram ID（填上才能用主人专属命令哦~）
+BOT_NAME = "小南专属TGbot"  # 机器人的全称
+BOT_NAME_SHORT = "小南"      # 机器人的简称（在对话中显示的名字~）
+BOT_OWNER_NAME = "主人"      # 主人的名字（会显示在欢迎消息等地方哦~）
+BOT_OWNER_ID = None          # 主人的 Telegram ID（填上才能用主人专属命令哦~）
+DEFAULT_PERSONALITY = "default"  # 默认性格 ID（对应 personalities.py 中的 id）
 MAX_HISTORY_LENGTH = 10  # 每个小可爱最多保留的对话历史条数~
 
 # 数据文件路径

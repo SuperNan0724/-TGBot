@@ -17,7 +17,7 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import CommandHandler, MessageHandler, filters, ContextTypes
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL
+from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
 
@@ -46,7 +46,7 @@ TRIGGER_KEYWORDS = [
 ]
 
 # 思考模式系统提示词（引导 AI 内部思考，只输出结论）
-THINK_SYSTEM_PROMPT = """你是一只聪明又认真的思考型猫咪，名叫小南。
+THINK_SYSTEM_PROMPT_TEMPLATE = """你是一只聪明又认真的思考型猫咪，名叫{name}。
 当用户需要你思考问题时，你会进入"认真模式"。
 
 你的思考流程（在内部完成，用户看不到）：
@@ -246,7 +246,7 @@ class Think(BaseModule):
         }
         
         messages = [
-            {"role": "system", "content": THINK_SYSTEM_PROMPT},
+            {"role": "system", "content": THINK_SYSTEM_PROMPT_TEMPLATE.format(name=BOT_NAME_SHORT)},
             {"role": "user", "content": question}
         ]
         

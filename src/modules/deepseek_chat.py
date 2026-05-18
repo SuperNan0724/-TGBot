@@ -11,10 +11,10 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTORY_LENGTH
+from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTORY_LENGTH, BOT_NAME_SHORT, DEFAULT_PERSONALITY
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES
+from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ class DeepSeekChat(BaseModule):
         """/role 命令 - 呼出性格选择菜单（翻页）~"""
         user_id = update.effective_user.id
         user_data = self.dm.get_user_data(user_id)
-        current_role = user_data.get("personality", "default")
+        current_role = user_data.get("personality", DEFAULT_PERSONALITY)
         current_name = PERSONALITY_NAMES.get(current_role, "🐱 默认 - 可爱猫咪")
 
         # 保存当前页到 context
@@ -251,7 +251,7 @@ class DeepSeekChat(BaseModule):
         data = query.data
         user_id = update.effective_user.id
         user_data = self.dm.get_user_data(user_id)
-        current_role = user_data.get("personality", "default")
+        current_role = user_data.get("personality", DEFAULT_PERSONALITY)
 
         # 翻页操作
         if data == "role_page_next":
@@ -414,7 +414,7 @@ class DeepSeekChat(BaseModule):
         
         user_id = update.effective_user.id
         user_data = self.dm.get_user_data(user_id)
-        personality = user_data.get("personality", "default")
+        personality = user_data.get("personality", DEFAULT_PERSONALITY)
         
         # 发送"正在输入"状态
         await update.effective_chat.send_action("typing")
@@ -454,7 +454,7 @@ class DeepSeekChat(BaseModule):
     
     def _build_messages(self, user_data: dict, personality: str, question: str, user_id: int) -> list:
         """构建消息列表（包含记忆）~"""
-        system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["default"])
+        system_prompt = get_prompt(personality, BOT_NAME_SHORT)
         
         # 获取用户的记忆
         user_memories = _get_user_memories(user_id)
