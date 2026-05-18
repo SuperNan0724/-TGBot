@@ -28,11 +28,5 @@ ERROR_LOG_FILE = "data/errors.json"
 BACKUP_DIR = "data/backups"
 
 # 模块配置
-ENABLED_MODULES = [
-    "deepseek_chat",  # DeepSeek AI 对话模块
-    "help",           # 帮助模块
-    "admin",          # 管理模块
-    "system",         # 系统模块
-    "fun",            # 娱乐模块
-    # 在这里添加更多模块吧(๑•̀ㅂ•́)و✧
-]
+# 模块已改为自动扫描加载~
+# 把 .py 文件丢进 src/modules/ 目录就会自动加载啦！(๑•̀ㅂ•́)و✧
