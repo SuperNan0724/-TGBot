@@ -288,7 +288,9 @@ class AutoUpdater(BaseModule):
                         continue
                     
                     local_path = os.path.join(ROOT_DIR, rel_path)
-                    github_url = f"{GITHUB_RAW_BASE}/{rel_path.replace('\\', '/')}"
+                    # 将 Windows 反斜杠替换为正斜杠（不能在 f-string 中使用反斜杠）
+                    rel_path_unix = rel_path.replace("\\", "/")
+                    github_url = f"{GITHUB_RAW_BASE}/{rel_path_unix}"
                     
                     try:
                         # 下载文件

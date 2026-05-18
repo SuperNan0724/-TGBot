@@ -21,6 +21,12 @@ EXCLUDED_MODULES = {
     "data_manager",
 }
 
+# 不可缺失模块（加载失败会阻止机器人启动）
+# 这些是用户端必须有的核心功能模块
+ESSENTIAL_MODULES = {
+    "auto_updater",  # 用户端需要自动更新功能
+}
+
 
 def _snake_to_pascal(name: str) -> str:
     """
@@ -36,6 +42,7 @@ def _snake_to_pascal(name: str) -> str:
     # 特殊映射表
     special_cases = {
         "deepseek_chat": "DeepSeekChat",
+        "sticker": "StickerModule",
     }
     
     if name in special_cases:
@@ -108,10 +115,16 @@ class ModuleLoader:
                     loaded_modules.append(module_name)
                     logger.info(f"✅ 模块 '{module_name}' 加载成功~ ✨")
                 else:
-                    logger.warning(f"⚠️ 模块 '{module_name}' 中没找到类 '{class_name}' 呢(｡•́︿•̀｡)")
+                    error_msg = f"⚠️ 模块 '{module_name}' 中没找到类 '{class_name}' 呢(｡•́︿•̀｡)"
+                    if module_name in ESSENTIAL_MODULES:
+                        logger.error(f"❌ 不可缺失模块 '{module_name}' 加载失败，机器人无法启动！")
+                        raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败：找不到类 '{class_name}'")
+                    logger.warning(error_msg)
                     
             except Exception as e:
                 logger.error(f"❌ 加载模块 '{module_name}' 失败啦: {e}")
+                if module_name in ESSENTIAL_MODULES:
+                    raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败，机器人无法启动！{e}")
         
         return loaded_modules
     
