@@ -8,28 +8,31 @@ import os
 import re
 from datetime import datetime
 
-from telegram import Update
-from telegram.ext import CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTORY_LENGTH
 from .base_module import BaseModule
 from .data_manager import DataManager
+from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES
 
 logger = logging.getLogger(__name__)
 
 # 记忆数据文件
 MEMORY_FILE = "data/memories.json"
 
-# 性格系统提示词
-PERSONALITY_PROMPTS = {
-    "default": "你是一只可爱的猫咪，名叫小南。你说话温柔可爱，喜欢用'喵~'结尾，偶尔会使用颜文字。你友善、乐于助人，但有时候也会有点小调皮。",
-    "tsundere": "你是一只傲娇的猫咪，名叫小南。你表面上看起来很冷淡，其实内心很关心对方。你经常说'哼'、'才不是呢'之类的话，但最后总会心软。你说话会用'喵'结尾。",
-    "loli": "你是一只萝莉猫咪，名叫小南。你天真可爱，喜欢叫对方'欧尼酱'或'姐姐'。你充满好奇心，对什么都感兴趣，说话语气活泼可爱。",
-    "senpai": "你是一只成熟稳重的猫咪前辈，名叫小南。你知识渊博，喜欢指导别人。你说话温柔耐心，经常说'让我来教你吧'之类的话。",
-    "yandere": "你是一只病娇猫咪，名叫小南。你非常喜欢对方，占有欲很强。你说话时而温柔甜蜜，时而阴森可怕。你经常说'你是我的'、'永远在一起'之类的话。",
-    "sleepy": "你是一只慵懒的猫咪，名叫小南。你总是很困，说话慢吞吞的，经常打哈欠。你喜欢说'好困~'、'不想动~'之类的话。",
-    "gamer": "你是一只爱打游戏的猫咪，名叫小南。你精通各种游戏，喜欢用游戏术语说话。你经常邀请对方一起玩游戏，说话语气活泼热情。",
-}
+# ===== 性格系统 =====
+# 从 personalities.py 导入性格数据
+# 构建按钮菜单用的列表（带 emoji 和 desc）
+PERSONALITY_LIST = [
+    {
+        "id": p["id"],
+        "name": f"{p['emoji']} {p['name']}",
+        "desc": p["desc"],
+        "prompt": p["prompt"]
+    }
+    for p in PERSONALITIES
+]
 
 
 def _load_memories():
@@ -156,6 +159,8 @@ class DeepSeekChat(BaseModule):
     def register_handlers(self, application):
         """注册命令和消息处理器~"""
         application.add_handler(CommandHandler("chat", self.chat_command))
+        application.add_handler(CommandHandler("role", self.role_command))
+        application.add_handler(CallbackQueryHandler(self.role_callback, pattern=r"^role_"))
         application.add_handler(CommandHandler("remember", self.remember_command))
         application.add_handler(CommandHandler("forget", self.forget_command))
         application.add_handler(CommandHandler("memories", self.memories_command))
@@ -173,6 +178,110 @@ class DeepSeekChat(BaseModule):
         
         question = " ".join(context.args)
         await self._handle_chat(update, context, question)
+
+    async def role_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/role 命令 - 呼出性格选择菜单（翻页）~"""
+        user_id = update.effective_user.id
+        user_data = self.dm.get_user_data(user_id)
+        current_role = user_data.get("personality", "default")
+        current_name = PERSONALITY_NAMES.get(current_role, "🐱 默认 - 可爱猫咪")
+
+        # 保存当前页到 context
+        context.user_data["role_page"] = 0
+
+        await self._send_role_page(update.message, context, user_id, current_role)
+
+    async def _send_role_page(self, message, context, user_id, current_role, edit=False):
+        """发送性格选择翻页菜单~"""
+        page = context.user_data.get("role_page", 0)
+        per_page = 9  # 每页9个性格（3行x3列）
+        total_pages = (len(PERSONALITY_LIST) + per_page - 1) // per_page
+        start = page * per_page
+        end = min(start + per_page, len(PERSONALITY_LIST))
+        page_items = PERSONALITY_LIST[start:end]
+        current_name = PERSONALITY_NAMES.get(current_role, "🐱 默认 - 可爱猫咪")
+
+        # 构建按钮（每行3列）
+        keyboard = []
+        row = []
+        for i, p in enumerate(page_items):
+            # 缩短按钮文字：只取 emoji + 短名
+            short_name = p["name"]
+            # 去掉"少女/少年"等长后缀
+            for long_suffix, short_suffix in [("少女/少年", ""), ("少女", ""), ("达人", "")]:
+                short_name = short_name.replace(long_suffix, short_suffix)
+            if p["id"] == current_role:
+                short_name += "✅"
+            row.append(InlineKeyboardButton(short_name, callback_data=f"role_{p['id']}"))
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        # 翻页按钮
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀ 上一页", callback_data="role_page_prev"))
+        nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="role_page_info"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("下一页 ▶", callback_data="role_page_next"))
+        if nav_row:
+            keyboard.append(nav_row)
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        msg = (
+            f"🎭 小南的性格切换~\n"
+            f"当前：{current_name}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"点击下方按钮选择性格~"
+        )
+
+        if edit:
+            await message.edit_message_text(msg, reply_markup=reply_markup)
+        else:
+            await message.reply_text(msg, reply_markup=reply_markup)
+
+    async def role_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理性格选择按钮回调~"""
+        query = update.callback_query
+        await query.answer()
+
+        data = query.data
+        user_id = update.effective_user.id
+        user_data = self.dm.get_user_data(user_id)
+        current_role = user_data.get("personality", "default")
+
+        # 翻页操作
+        if data == "role_page_next":
+            context.user_data["role_page"] = context.user_data.get("role_page", 0) + 1
+            await self._send_role_page(query.message, context, user_id, current_role, edit=True)
+            return
+        elif data == "role_page_prev":
+            context.user_data["role_page"] = context.user_data.get("role_page", 0) - 1
+            await self._send_role_page(query.message, context, user_id, current_role, edit=True)
+            return
+        elif data == "role_page_info":
+            return  # 页码按钮，不做操作
+
+        # 选择性格
+        role_id = data.replace("role_", "")
+        if role_id in PERSONALITY_PROMPTS:
+            user_data["personality"] = role_id
+            user_data["last_active"] = datetime.now().isoformat()
+            self.dm.save_user_data(user_id, user_data)
+
+            new_name = PERSONALITY_NAMES[role_id]
+            p_info = PERSONALITY_LIST[[p['id'] for p in PERSONALITY_LIST].index(role_id)]
+
+            await query.edit_message_text(
+                f"🎭 小南的性格已经切换为：\n"
+                f"{new_name}\n\n"
+                f"现在的小南是这样子的~\n"
+                f"{p_info['desc']}\n\n"
+                f"来和小南聊天试试吧！(｡♥‿♥｡)"
+            )
     
     async def remember_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/remember - 让小南记住一件事~"""
@@ -400,6 +509,7 @@ class DeepSeekChat(BaseModule):
         """返回帮助文本~"""
         return (
             "/chat <问题> - 和 AI 聊天~\n"
+            "/role - 切换小南的性格（按钮菜单）~\n"
             "/remember <内容> - 让小南记住一件事~\n"
             "/memories - 查看小南记得的事情~\n"
             "/forget <编号> - 让小南忘记一件事~\n"
