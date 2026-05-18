@@ -361,6 +361,12 @@ class DeepSeekChat(BaseModule):
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         
+        # 私聊：检查是否开启了女友模式
+        if chat_type == "private":
+            user_data = self.dm.get_user_data(user_id)
+            if user_data.get("girlfriend_mode"):
+                return  # 女友模式已开启，让 girlfriend 模块处理
+        
         # 私聊：检查用户是否在白名单
         if chat_type == "private":
             if not self.dm.is_user_whitelisted(user_id) and not self.dm.is_owner(user_id):

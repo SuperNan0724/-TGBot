@@ -43,6 +43,7 @@ def _snake_to_pascal(name: str) -> str:
     special_cases = {
         "deepseek_chat": "DeepSeekChat",
         "sticker": "StickerModule",
+        "girlfriend": "GirlfriendModule",
     }
     
     if name in special_cases:

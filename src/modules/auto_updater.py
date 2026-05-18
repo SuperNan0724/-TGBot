@@ -49,7 +49,7 @@ CORE_FILES = [
     ".dockerignore",
     "src/main.py",
     "src/requirements.txt",
-    "src/deploy/commands.txt",
+    "src/deploy/指令集.txt",
     "src/deploy/Dockerfile",
     "src/deploy/docker-compose.yml",
     "src/deploy/setup.bat",

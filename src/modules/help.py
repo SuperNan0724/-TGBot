@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 
 # 指令列表文件路径（在 src/deploy 文件夹中）
 COMMANDS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "commands.txt"
+    os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "指令集.txt"
 )
 
 
 def _load_commands() -> dict:
-    """从 commands.txt 加载指令列表~"""
+    """从指令集.txt 加载指令列表~"""
     commands = {}
     current_category = "未分类"
     

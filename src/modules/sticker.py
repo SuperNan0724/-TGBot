@@ -287,11 +287,125 @@ class StickerModule(BaseModule):
         application.add_handler(CommandHandler("sticker_list", self.sticker_list_command))
         application.add_handler(CommandHandler("del_sticker", self.del_sticker_command))
         
+        # 检测贴纸链接消息（处理 /add_sticker 后面没空格直接跟链接的情况）
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r'(?:^|/)add_sticker\S*|t\.me/addstickers/'),
+            self.handle_sticker_link
+        ))
+        
         # 按钮回调
         application.add_handler(CallbackQueryHandler(self.sticker_callback, pattern=r"^sticker_"))
     
+    async def handle_sticker_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理贴纸链接消息~ 自动解析并添加贴纸集（仅主人私聊可用）"""
+        user_id = update.effective_user.id
+        chat_type = update.effective_chat.type
+        
+        # 仅主人可用，且仅限私聊
+        if not self.dm.is_owner(user_id) or chat_type != "private":
+            return
+        
+        text = update.effective_message.text or ""
+        
+        # 提取贴纸链接
+        import re
+        match = re.search(r'https?://t\.me/addstickers/(\S+)', text)
+        if not match:
+            return  # 没有贴纸链接，忽略
+        
+        set_name = match.group(1)
+        
+        # 发送处理中的提示
+        status_msg = await update.message.reply_text(
+            f"🔍 正在解析贴纸集：{set_name}\n"
+            f"请稍等~ 小南正在努力加载中… (｡•̀ᴗ-)✧"
+        )
+        
+        try:
+            # 通过 Telegram API 获取贴纸集信息
+            bot = context.bot
+            sticker_set = await bot.get_sticker_set(set_name)
+            
+            if not sticker_set:
+                await status_msg.edit_text(
+                    f"❌ 没有找到贴纸集：{set_name}\n"
+                    f"请检查链接是否正确哦~"
+                )
+                return
+            
+            stickers = sticker_set.stickers
+            if not stickers:
+                await status_msg.edit_text(
+                    f"📦 贴纸集 {set_name} 是空的呢~"
+                )
+                return
+            
+            # 加载现有收藏
+            stickers_data = _load_stickers()
+            existing_ids = {s["file_id"] for s in stickers_data["stickers"]}
+            
+            # 统计信息
+            added_count = 0
+            skip_count = 0
+            
+            for sticker in stickers:
+                if sticker.file_id in existing_ids:
+                    skip_count += 1
+                    continue
+                
+                new_sticker = {
+                    "file_id": sticker.file_id,
+                    "set_name": sticker.set_name or set_name,
+                    "emoji": sticker.emoji or "",
+                    "width": sticker.width,
+                    "height": sticker.height,
+                    "is_animated": sticker.is_animated,
+                    "is_video": sticker.is_video,
+                    "added_at": datetime.now().isoformat(),
+                }
+                stickers_data["stickers"].append(new_sticker)
+                existing_ids.add(sticker.file_id)
+                added_count += 1
+            
+            if added_count > 0:
+                _save_stickers(stickers_data)
+            
+            # 构建结果消息
+            anim_count = sum(1 for s in stickers if s.is_animated)
+            static_count = len(stickers) - anim_count
+            
+            result_msg = (
+                f"✅ 贴纸集解析完成！\n\n"
+                f"📦 贴纸集：{sticker_set.name}\n"
+                f"📊 贴纸集共 {len(stickers)} 个贴纸\n"
+                f"   🖼️ 静态：{static_count} 个\n"
+                f"   🎬 动态：{anim_count} 个\n\n"
+                f"📥 本次新增收藏：{added_count} 个\n"
+            )
+            
+            if skip_count > 0:
+                result_msg += f"⏭️ 已存在跳过：{skip_count} 个\n"
+            
+            result_msg += (
+                f"📊 当前共收藏：{len(stickers_data['stickers'])} 个贴纸\n\n"
+                f"查看收藏：/sticker_list"
+            )
+            
+            await status_msg.edit_text(result_msg)
+            
+        except Exception as e:
+            logger.error(f"解析贴纸集失败: {e}")
+            await status_msg.edit_text(
+                f"❌ 解析贴纸集失败…\n\n"
+                f"可能的原因：\n"
+                f"• 贴纸集不存在或已删除\n"
+                f"• 贴纸集名称不正确\n"
+                f"• 网络连接问题\n\n"
+                f"请检查链接是否正确，或稍后重试~"
+            )
+    
     async def handle_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理贴纸消息~"""
+        """处理贴纸消息~ 回复一个收藏的贴纸表情"""
         chat_type = update.effective_chat.type
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
@@ -301,44 +415,77 @@ class StickerModule(BaseModule):
             if not self.dm.is_user_whitelisted(user_id) and not self.dm.is_owner(user_id):
                 return
         
-        # 群聊：检查群组是否在白名单
+        # 群聊：检查群组是否在白名单，且需要被提及才回复
         elif chat_type in ("group", "supergroup"):
             if not self.dm.is_group_whitelisted(chat_id):
                 return
+            
+            # 检查是否应该回复（和聊天逻辑一致）
+            bot_username = context.bot.username
+            bot_id = context.bot.id
+            message = update.effective_message
+            
+            # 情况1：被 @ 了
+            is_mentioned = bot_username and f"@{bot_username}" in (message.text or "")
+            
+            # 情况2：回复了机器人的消息
+            is_reply_to_bot = False
+            if message.reply_to_message and message.reply_to_message.from_user:
+                is_reply_to_bot = message.reply_to_message.from_user.id == bot_id
+            
+            if not is_mentioned and not is_reply_to_bot:
+                return  # 既没被@也没回复机器人，忽略
         
-        sticker = update.effective_message.sticker
+        # 从收藏库中随机选一个贴纸回复
+        stickers_data = _load_stickers()
+        stickers = stickers_data["stickers"]
         
-        # 获取贴纸信息
-        sticker_info = []
-        sticker_info.append(f"📦 贴纸集：{sticker.set_name or '未知'}")
-        sticker_info.append(f"🆔 文件ID：{sticker.file_id}")
-        sticker_info.append(f"📐 尺寸：{sticker.width}x{sticker.height}")
-        if sticker.emoji:
-            sticker_info.append(f"😊 表情：{sticker.emoji}")
-        if sticker.is_animated:
-            sticker_info.append(f"🎬 类型：动态贴纸")
-        else:
-            sticker_info.append(f"🖼️ 类型：静态贴纸")
+        if stickers:
+            # 有收藏的贴纸，随机选一个回复
+            chosen = random.choice(stickers)
+            try:
+                await update.message.reply_sticker(chosen["file_id"])
+                return
+            except Exception as e:
+                logger.warning(f"回复贴纸失败（可能已失效），尝试下一个: {e}")
+                # 如果失败，尝试其他贴纸
+                remaining = [s for s in stickers if s["file_id"] != chosen["file_id"]]
+                for s in remaining:
+                    try:
+                        await update.message.reply_sticker(s["file_id"])
+                        return
+                    except Exception:
+                        continue
         
-        # 动态生成回复语（根据 emoji 和贴纸类型）
-        reply = _get_dynamic_reply(sticker)
-        
-        # 构建回复消息
-        msg = (
-            f"{reply}\n\n"
-            f"🔍 贴纸信息：\n"
-            + "\n".join(sticker_info)
-        )
-        
-        # 添加收藏提示（仅主人可见）
-        if self.dm.is_owner(user_id):
-            msg += "\n\n💡 主人可以用 /add_sticker 收藏这个贴纸哦~"
-        
-        await update.message.reply_text(msg)
+        # 没有收藏贴纸或所有贴纸都失效时，用文字回复
+        reply = _get_dynamic_reply(update.effective_message.sticker)
+        await update.message.reply_text(reply)
     
     async def add_sticker_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/add_sticker - 收藏贴纸（主人专属）"""
         if not self._check_owner(update, context):
+            return
+        
+        # 检查参数中是否有贴纸链接
+        import re
+        sticker_link = None
+        if context.args:
+            link_text = " ".join(context.args)
+            link_match = re.search(r'https?://t\.me/addstickers/(\S+)', link_text)
+            if link_match:
+                sticker_link = link_match.group(1)
+        
+        if sticker_link:
+            # 通过链接添加贴纸集
+            await update.message.reply_text(
+                f"📦 检测到贴纸集链接：{sticker_link}\n\n"
+                f"💡 小南暂时无法直接通过链接下载贴纸集哦~\n"
+                f"请按以下步骤操作：\n\n"
+                f"1️⃣ 点击链接打开贴纸集：https://t.me/addstickers/{sticker_link}\n"
+                f"2️⃣ 发送其中的任意一个贴纸给小南\n"
+                f"3️⃣ 回复那个贴纸消息，发送 /add_sticker\n\n"
+                f"这样小南就能收藏这个贴纸啦！(｡♥‿♥｡)"
+            )
             return
         
         # 检查是否是回复贴纸消息
@@ -537,9 +684,15 @@ class StickerModule(BaseModule):
         """检查是否是主人~"""
         user_id = update.effective_user.id
         if not self.dm.is_owner(user_id):
-            context.application.create_task(
-                update.message.reply_text("呜… 你不是我的主人，不能使用这个命令哦！(｡•́︿•̀｡)")
-            )
+            # 优先使用 message，如果没有则使用 callback_query
+            if update.message:
+                context.application.create_task(
+                    update.message.reply_text("呜… 你不是我的主人，不能使用这个命令哦！(｡•́︿•̀｡)")
+                )
+            elif update.callback_query:
+                context.application.create_task(
+                    update.callback_query.edit_message_text("呜… 你不是我的主人，不能使用这个命令哦！(｡•́︿•̀｡)")
+                )
             return False
         return True
     
