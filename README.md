@@ -226,28 +226,71 @@ python start.py
 
 ## 📝 配置说明
 
-编辑 `src/config.py` 文件，填入以下信息：
+### 📄 配置文件位置
 
-| 配置项 | 说明 | 必填 |
-|--------|------|:----:|
-| `TELEGRAM_BOT_TOKEN` | 从 @BotFather 获取的 Token 🔑 | ✅ **必填！** |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key（让 AI 更聪明~） | ❌ 可选 |
-| `BOT_OWNER_ID` | 你的 Telegram ID（主人专属命令用~） | ✅ **推荐填！** |
-| `BOT_NAME` | 机器人全称（比如「小南专属TGbot」） | ❌ 可选 |
-| `BOT_NAME_SHORT` | 机器人简称（对话中显示的名字~） | ❌ 可选 |
-| `DEFAULT_PERSONALITY` | 默认性格 ID（默认是可爱猫咪~） | ❌ 可选 |
+所有配置都在 **`src/config.py`** 文件中，用记事本或任意代码编辑器打开就能修改啦~
+
+> ⚠️ **注意：** 项目中有两个 `config.py` 文件：
+> - **`src/config.py`** ← 你实际要修改的配置文件（含你的敏感信息）
+> - `source/src/config.py` ← 上传 GitHub 用的模板（不含敏感信息，不要改这个！）
+>
+> 使用 `sync.py` 同步时，`source/src/config.py` 会自动保留你的敏感字段，不会丢失哦~
+
+---
+
+### 🔑 需要修改的配置项
+
+打开 `src/config.py`，你会看到这样的内容：
+
+```python
+# ===== 🔑 必填项（不填小南不会理你哦~）=====
+
+# 1️⃣ Telegram Bot Token（从 @BotFather 获取）
+TELEGRAM_BOT_TOKEN = "这里填你的Token"  # ← 把引号里的内容换成你的 Token！
+
+# 2️⃣ DeepSeek API Key（让 AI 更聪明~）
+DEEPSEEK_API_KEY = "这里填你的Key"      # ← 把引号里的内容换成你的 Key！
+
+# 3️⃣ 你的 Telegram ID（主人专属命令用~）
+BOT_OWNER_ID = 123456789                # ← 把数字换成你的 ID！
+```
+
+| 配置项 | 在哪里获取 | 怎么填 | 必填 |
+|--------|-----------|:------|:----:|
+| 🔑 `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` → 复制 Token | 填在引号里：`"123456:ABCdef..."` | ✅ **必填！** |
+| 🔑 `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API Keys → 创建 | 填在引号里：`"sk-xxxx..."` | ❌ 可选 |
+| 👑 `BOT_OWNER_ID` | [@userinfobot](https://t.me/userinfobot) → START → 复制 ID | 直接填数字：`7609256840` | ✅ **推荐填！** |
 
 > 💡 **怎么获取我的 Telegram ID？**
-> 搜索 @userinfobot，点 START，它会告诉你你的 ID 哦~
+> 1. 打开 Telegram，搜索 **@userinfobot**
+> 2. 点击 **START**（开始）
+> 3. 它会直接回复你一串数字，比如：`Your ID: 7609256840`
+> 4. 把这串数字填到 `BOT_OWNER_ID = ` 后面就行啦~
 
-> ⚠️ **关于网络连接**
->
-> 由于 Telegram API 在国内无法直接访问，你需要：
-> - **方案一**：使用代理软件（如 Clash、v2ray、SSR 等），开启系统代理或 TUN 模式
-> - **方案二**：在海外服务器上部署（比如阿里云国际版、AWS、Vultr 等）
-> - **方案三**：使用 Docker 部署并配置容器代理
->
-> 本项目不内置代理功能，请自行确保网络环境可以访问 Telegram API 哦~
+---
+
+### ✨ 可选配置项
+
+除了上面的必填项，你还可以自定义这些：
+
+| 配置项 | 默认值 | 说明 |
+|--------|:------:|:-----|
+| `BOT_NAME` | `"小南专属TGbot"` | 机器人的全称（显示在日志里~） |
+| `BOT_NAME_SHORT` | `"小南"` | 机器人的简称（对话中显示的名字~） |
+| `BOT_OWNER_NAME` | `"主人"` | 主人的名字（会显示在欢迎消息等地方~） |
+| `DEFAULT_PERSONALITY` | `"default"` | 默认性格 ID（对应 personalities.py 中的 id） |
+| `MAX_HISTORY_LENGTH` | `10` | 每个小可爱最多保留的对话历史条数~ |
+
+---
+
+### ⚠️ 关于网络连接
+
+由于 Telegram API 在国内无法直接访问，你需要：
+- **方案一**：使用代理软件（如 Clash、v2ray、SSR 等），开启系统代理或 TUN 模式
+- **方案二**：在海外服务器上部署（比如阿里云国际版、AWS、Vultr 等）
+- **方案三**：使用 Docker 部署并配置容器代理
+
+本项目不内置代理功能，请自行确保网络环境可以访问 Telegram API 哦~
 
 ---
 
