@@ -239,7 +239,7 @@ class DeepSeekChat(BaseModule):
         )
 
         if edit:
-            await message.edit_message_text(msg, reply_markup=reply_markup)
+            await message.edit_text(msg, reply_markup=reply_markup)
         else:
             await message.reply_text(msg, reply_markup=reply_markup)
 
