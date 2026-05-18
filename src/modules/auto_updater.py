@@ -92,6 +92,7 @@ class AutoUpdater(BaseModule):
     def register_handlers(self, application):
         """注册命令处理器~"""
         application.add_handler(CommandHandler("update", self.update_command))
+        application.add_handler(CommandHandler("check_update", self.check_update_command))
         application.add_handler(CallbackQueryHandler(self.update_callback, pattern=r"^update_"))
     
     async def start_periodic_check(self, application):
@@ -128,6 +129,53 @@ class AutoUpdater(BaseModule):
                         logger.warning(f"通知管理员失败: {e}")
         except Exception as e:
             logger.error(f"检查更新失败: {e}")
+    
+    async def check_update_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/check_update 命令 - 手动检查更新，不自动下载~"""
+        user_id = update.effective_user.id
+        
+        # 检查权限（仅主人可用）
+        from config import BOT_OWNER_ID
+        if BOT_OWNER_ID and user_id != BOT_OWNER_ID:
+            await update.message.reply_text(
+                "呜… 只有主人才能检查小南的更新呢(｡•́︿•̀｡)\n"
+                "请让主人来操作吧~"
+            )
+            return
+        
+        await update.message.reply_text("🔍 正在检查更新，请稍等~")
+        
+        try:
+            has_update, info = await self._check_github_version()
+            
+            if has_update:
+                await update.message.reply_text(
+                    f"🔄 发现新版本！\n\n"
+                    f"📦 当前版本：{info.get('current_version', '未知')}\n"
+                    f"📦 最新版本：{info.get('version', '未知')}\n"
+                    f"📝 更新内容：\n{info.get('description', '无')}\n\n"
+                    f"💡 想更新的话，发送 /update 来更新哦~\n"
+                    f"可以选择「全部更新」或「仅核心文件」~",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔄 去更新", callback_data="update_check")
+                    ]])
+                )
+            else:
+                await update.message.reply_text(
+                    f"✅ 小南已经是最新版本啦~\n\n"
+                    f"📦 当前版本：{info.get('current_version', '未知')}\n"
+                    f"🕐 检查时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                    f"下次自动检查时间：{(datetime.now() + timedelta(hours=CHECK_INTERVAL_HOURS)).strftime('%Y-%m-%d %H:%M')}"
+                )
+        except Exception as e:
+            logger.error(f"检查更新失败: {e}")
+            await update.message.reply_text(
+                f"❌ 检查更新失败：{str(e)}\n\n"
+                f"可能的原因：\n"
+                f"• 网络无法访问 GitHub\n"
+                f"• GitHub API 限制\n"
+                f"请稍后再试~"
+            )
     
     async def update_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/update 命令 - 检查并更新小南~"""
@@ -240,7 +288,7 @@ class AutoUpdater(BaseModule):
                         continue
                     
                     local_path = os.path.join(ROOT_DIR, rel_path)
-                    github_url = f"{GITHUB_RAW_BASE}/{rel_path.replace(os.sep, '/')}"
+                    github_url = f"{GITHUB_RAW_BASE}/{rel_path.replace('\\', '/')}"
                     
                     try:
                         # 下载文件
@@ -421,5 +469,6 @@ class AutoUpdater(BaseModule):
         """返回帮助文本~"""
         return (
             "/update - 检查并更新小南到最新版本~\n"
+            "/check_update - 手动检查更新，不自动下载~\n"
             "🔄 自动每12小时检查一次更新~"
         )

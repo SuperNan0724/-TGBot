@@ -92,36 +92,27 @@ class BotApp:
             # 自动杀掉最先启动的旧进程
             try:
                 import subprocess
-                import platform
-                if platform.system() == "Windows":
-                    # 获取所有 python 进程，按启动时间排序，杀掉最早的那个
-                    result = subprocess.run(
-                        ["wmic", "process", "where", 'name="python.exe"', "get", "processid,creationdate"],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    lines = [line.strip() for line in result.stdout.split("\n") if line.strip()]
-                    # 跳过标题行，按创建时间排序
-                    processes = []
-                    for line in lines[1:]:
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[0].isdigit():
-                            processes.append((parts[0], parts[1]))
-                    if processes:
-                        # 按创建时间排序，取最早的（创建时间最小的）
-                        processes.sort(key=lambda x: x[0])
-                        oldest_pid = processes[0][1]
-                        subprocess.run(
-                            ["taskkill", "/F", "/PID", oldest_pid],
-                            capture_output=True, text=True, timeout=3
-                        )
-                        logger.info(f"🔫 已杀掉最早启动的旧进程 (PID: {oldest_pid})")
-                else:
-                    # Linux/macOS：杀掉最早启动的 python main.py 进程
+                # 获取所有 python 进程，按启动时间排序，杀掉最早的那个
+                result = subprocess.run(
+                    ["wmic", "process", "where", 'name="python.exe"', "get", "processid,creationdate"],
+                    capture_output=True, text=True, timeout=5
+                )
+                lines = [line.strip() for line in result.stdout.split("\n") if line.strip()]
+                # 跳过标题行，按创建时间排序
+                processes = []
+                for line in lines[1:]:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        processes.append((parts[0], parts[1]))
+                if processes:
+                    # 按创建时间排序，取最早的（创建时间最小的）
+                    processes.sort(key=lambda x: x[0])
+                    oldest_pid = processes[0][1]
                     subprocess.run(
-                        ["pkill", "-9", "-f", "main.py"],
-                        capture_output=True, text=True, timeout=5
+                        ["taskkill", "/F", "/PID", oldest_pid],
+                        capture_output=True, text=True, timeout=3
                     )
-                    logger.info("🔫 已杀掉所有旧 main.py 进程")
+                    logger.info(f"🔫 已杀掉最早启动的旧进程 (PID: {oldest_pid})")
             except Exception as e:
                 logger.warning(f"⚠️ 自动清理旧进程失败：{e}")
             

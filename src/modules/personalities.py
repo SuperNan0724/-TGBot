@@ -4,6 +4,8 @@
 """
 import logging
 
+from .base_module import BaseModule
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -730,3 +732,22 @@ def get_personality_name(personality_id: str) -> str:
         str: 带 emoji 的性格名称
     """
     return PERSONALITY_NAMES.get(personality_id, PERSONALITY_NAMES["default"])
+
+
+class Personalities(BaseModule):
+    """性格模块~ 提供各种可爱的性格给 AI 使用！(｡♥‿♥｡)
+    
+    这个模块不注册任何命令，只提供性格数据和查询函数~
+    其他模块（如 deepseek_chat）通过 get_prompt() 和 get_personality_name() 来使用。
+    """
+    
+    name = "personalities"
+    description = "40种可爱性格~"
+    
+    def register_handlers(self, application):
+        """性格模块不需要注册命令~"""
+        pass
+    
+    def get_help_text(self) -> str:
+        """返回帮助文本~"""
+        return ""

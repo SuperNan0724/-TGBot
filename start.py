@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-🐱 小南专属TGbot - 跨平台启动器
-自动检测操作系统，调用合适的部署方式~
-支持 Windows / Linux / macOS / Docker
+🐱 小南专属TGbot - Windows 启动器
+专为 Windows 平台设计~ 自动检测环境并启动机器人！
 """
 import os
 import sys
-import platform
 import subprocess
 import shutil
 
 
-# 颜色代码（兼容 Windows）
+# 颜色代码
 class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -24,10 +22,8 @@ class Colors:
 
 
 def print_color(text: str, color: str = ""):
-    """打印彩色文字（自动检测终端支持）"""
-    if platform.system() == "Windows":
-        # Windows 10+ 支持 ANSI
-        os.system("")  # 启用 ANSI 转义
+    """打印彩色文字"""
+    os.system("")  # 启用 ANSI 转义
     print(f"{color}{text}{Colors.RESET}")
 
 
@@ -38,20 +34,9 @@ def get_project_root() -> str:
 
 def detect_system() -> dict:
     """检测系统环境信息"""
-    system = platform.system()
-    machine = platform.machine()
-    python_version = sys.version
-    
     info = {
-        "system": system,
-        "machine": machine,
-        "python_version": python_version,
-        "is_windows": system == "Windows",
-        "is_linux": system == "Linux",
-        "is_macos": system == "Darwin",
         "has_docker": shutil.which("docker") is not None,
-        "has_docker_compose": shutil.which("docker-compose") is not None or shutil.which("docker") is not None,
-        "has_python": True,
+        "has_docker_compose": shutil.which("docker") is not None,
         "has_git": shutil.which("git") is not None,
     }
     
@@ -80,16 +65,14 @@ def print_banner():
     ║                                      ║
     ╚══════════════════════════════════════╝
 {Colors.RESET}
-{Colors.CYAN}              ~ 跨平台启动器 v1.0 ~{Colors.RESET}
+{Colors.CYAN}              ~ Windows 启动器 v1.0 ~{Colors.RESET}
     """
     print(banner)
 
 
 def print_system_info(info: dict):
     """打印系统信息"""
-    print(f"{Colors.BLUE}🔍 系统检测结果：{Colors.RESET}")
-    print(f"  • 操作系统：{Colors.CYAN}{info['system']} ({info['machine']}){Colors.RESET}")
-    print(f"  • Python版本：{Colors.CYAN}{info['python_version'].split()[0]}{Colors.RESET}")
+    print(f"{Colors.BLUE}🔍 环境检测结果：{Colors.RESET}")
     docker_status = f"{Colors.GREEN}✓{Colors.RESET} 已安装" if info["has_docker"] else f"{Colors.YELLOW}✗{Colors.RESET} 未安装"
     git_status = f"{Colors.GREEN}✓{Colors.RESET} 已安装" if info["has_git"] else f"{Colors.YELLOW}✗{Colors.RESET} 未安装"
     print(f"  • Docker：{docker_status}")
@@ -273,51 +256,39 @@ def install_dependencies():
 
 
 def kill_old_bot():
-    """一次性杀掉所有旧机器人进程，防止 Conflict 冲突~"""
-    system = platform.system()
-    
-    if system == "Windows":
-        # Windows：用 wmic 查所有 python 进程，逐个杀掉
-        try:
-            # 方法1：taskkill 杀所有 python.exe
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "python.exe"],
-                capture_output=True, text=True, timeout=5
-            )
-        except:
-            pass
-        try:
-            # 方法2：taskkill 杀所有 pythonw.exe（后台进程）
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "pythonw.exe"],
-                capture_output=True, text=True, timeout=5
-            )
-        except:
-            pass
-        try:
-            # 方法3：用 wmic 查所有含 main.py 的进程
-            result = subprocess.run(
-                ["wmic", "process", "where", 'name="python.exe"', "get", "processid"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.split("\n"):
-                pid = line.strip()
-                if pid.isdigit():
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", pid],
-                        capture_output=True, text=True, timeout=3
-                    )
-        except:
-            pass
-    else:
-        # Linux/macOS：用 pkill 杀所有 python 进程
-        try:
-            subprocess.run(
-                ["pkill", "-9", "-f", "python"],
-                capture_output=True, text=True, timeout=5
-            )
-        except:
-            pass
+    """杀掉所有旧机器人进程，防止 Conflict 冲突~"""
+    # Windows：用 taskkill 和 wmic 查杀 python 进程
+    try:
+        # 方法1：taskkill 杀所有 python.exe
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "python.exe"],
+            capture_output=True, text=True, timeout=5
+        )
+    except:
+        pass
+    try:
+        # 方法2：taskkill 杀所有 pythonw.exe（后台进程）
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "pythonw.exe"],
+            capture_output=True, text=True, timeout=5
+        )
+    except:
+        pass
+    try:
+        # 方法3：用 wmic 查所有含 main.py 的进程
+        result = subprocess.run(
+            ["wmic", "process", "where", 'name="python.exe"', "get", "processid"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.split("\n"):
+            pid = line.strip()
+            if pid.isdigit():
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", pid],
+                    capture_output=True, text=True, timeout=3
+                )
+    except:
+        pass
 
 
 def run_bot():
@@ -382,8 +353,7 @@ def run_docker():
 def main():
     """主函数~ 自动检测并选择合适的部署方式！"""
     # 设置控制台编码（Windows）
-    if platform.system() == "Windows":
-        os.system("chcp 65001 >nul 2>&1")
+    os.system("chcp 65001 >nul 2>&1")
     
     print_banner()
     
