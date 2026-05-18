@@ -110,46 +110,264 @@ Keep your token secure and store it safely.
 
 | 需要的东西 | 从哪里拿 | 难度 |
 |-----------|---------|:----:|
-| 💻 一台电脑（Windows/Linux/Mac 都行） | 你面前这个~ | ⭐ |
+| 💻 一台电脑（Windows / Linux / Mac 都行） | 你面前这个~ | ⭐ |
 | 🌐 能访问 Telegram 的网络 | 代理软件 or 海外服务器 | ⭐⭐ |
 | 🔑 Telegram Bot Token | 上面教过啦！@BotFather | ⭐ |
 | 🔑 DeepSeek API Key（可选） | [platform.deepseek.com](https://platform.deepseek.com) | ⭐⭐ |
 
-### 🎮 开始搭建！
+---
 
-#### 方式一：一键启动（推荐给萌新~）
+### 🪟 Windows 部署（最简单！）
 
+> Windows 用户看这里~ 跟着做就行啦！(｡♥‿♥｡)
+
+#### 第一步：下载项目 📥
+
+**方式一：直接下载 ZIP（推荐萌新~）**
+1. 打开项目页面：https://github.com/SuperNan0724/-TGBot
+2. 点击绿色的 **「Code」** 按钮
+3. 选择 **「Download ZIP」**
+4. 解压到你想放的地方，比如 `D:\小南专属TGbot\`
+
+**方式二：使用 Git（进阶~）**
 ```bash
-# 下载项目后，在项目目录里运行这一行就够啦！
+# 先安装 Git：https://git-scm.com/download/win
+# 然后打开 cmd 或 PowerShell，输入：
+git clone https://github.com/SuperNan0724/-TGBot.git
+cd -TGBot
+```
+
+#### 第二步：安装 Python 🐍
+
+1. 打开 https://www.python.org/downloads/
+2. 点击黄色的 **Download Python 3.x.x** 按钮
+3. 运行下载的安装包
+4. **⚠️ 重要！** 安装时一定要勾选 **「Add Python to PATH」**（把 Python 添加到系统路径）
+5. 点击 Install Now，等它装完~
+
+验证安装成功：
+```cmd
+# 打开 cmd 或 PowerShell，输入：
+python --version
+# 如果显示 Python 3.8+ 就说明成功啦！
+```
+
+#### 第三步：启动小南！🎉
+
+```cmd
+# 1️⃣ 进入项目目录（换成你的实际路径~）
+cd D:\小南专属TGbot
+
+# 2️⃣ 一行命令启动！（启动器会自动帮你搞定一切~）
 python start.py
 ```
 
 启动器会自动帮你：
-1. ✅ 检测你的系统（Windows/Linux/Mac）
+1. ✅ 检测你的系统
 2. ✅ 检查文件有没有缺失
 3. ✅ 检测你有没有填好配置
-4. ✅ 引导你填写 Token 和 Key（第一次启动时）
+4. ✅ **引导你填写 Token 和 Key**（第一次启动时）
 5. ✅ 自动安装需要的依赖
 6. ✅ 启动小南！
 
-> 💖 **就是这么简单！** 一行命令，小南就活过来啦~
+> 💖 **Windows 就是这么简单！** 下载 → 解压 → 双击运行，搞定！
 
-#### 方式二：手动启动（进阶玩家~）
+#### 第四步：后台运行（可选~）
+
+想让小南在后台一直运行，关掉窗口也不停？
+- 使用 `start.py` 启动后，它会自动在后台运行~
+- 或者用 **screen**（需要安装）：`python src/main.py`
+
+---
+
+### 🐧 Linux 部署（服务器/VPS）
+
+> Linux 用户看这里~ 适合在服务器上长期运行！(｡•̀ᴗ-)✧
+
+#### 第一步：连接服务器 🔌
 
 ```bash
-# 1️⃣ 先安装依赖
-pip install -r src/requirements.txt
-
-# 2️⃣ 编辑配置文件
-#    打开 src/config.py，填上你的 Token 和 Key~
-
-# 3️⃣ 启动小南！
-python src/main.py
+# 如果你用的是云服务器（阿里云、腾讯云、AWS 等）
+# 用 SSH 连接上去~
+ssh root@你的服务器IP
 ```
+
+#### 第二步：安装 Python 和 Git 🐍
+
+**Ubuntu / Debian 系统：**
+```bash
+# 更新软件源
+sudo apt update && sudo apt upgrade -y
+
+# 安装 Python 3、pip 和 Git
+sudo apt install python3 python3-pip git -y
+
+# 验证安装
+python3 --version
+pip3 --version
+```
+
+**CentOS / Rocky Linux 系统：**
+```bash
+# 安装 Python 3 和 Git
+sudo yum install python3 python3-pip git -y
+
+# 验证安装
+python3 --version
+pip3 --version
+```
+
+#### 第三步：下载项目 📥
+
+```bash
+# 克隆项目
+git clone https://github.com/SuperNan0724/-TGBot.git
+
+# 进入项目目录
+cd -TGBot
+```
+
+#### 第四步：配置和启动 🎉
+
+```bash
+# 方式一：一键启动（推荐~）
+python3 start.py
+
+# 方式二：手动启动（进阶~）
+# 1. 先安装依赖
+pip3 install -r src/requirements.txt
+
+# 2. 编辑配置文件
+nano src/config.py
+#    - 填上你的 TELEGRAM_BOT_TOKEN
+#    - 填上你的 DEEPSEEK_API_KEY（可选）
+#    - 填上你的 BOT_OWNER_ID
+#    Ctrl+X 保存退出
+
+# 3. 启动小南！
+python3 src/main.py
+```
+
+#### 第五步：后台运行（让机器人一直在线~）💪
+
+**方法一：使用 screen（推荐~）**
+```bash
+# 安装 screen
+sudo apt install screen -y   # Ubuntu/Debian
+sudo yum install screen -y   # CentOS
+
+# 创建一个名为 nan 的窗口
+screen -S nan
+
+# 在里面启动小南
+python3 start.py
+
+# 按 Ctrl+A 然后按 D 分离窗口（小南会在后台继续运行~）
+
+# 想回来看看？
+screen -r nan
+```
+
+**方法二：使用 systemd（开机自启~）**
+```bash
+# 创建服务文件
+sudo nano /etc/systemd/system/nanbot.service
+```
+
+把下面的内容贴进去（记得改路径和用户名）：
+```ini
+[Unit]
+Description=小南专属TGbot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/-TGBot
+ExecStart=/usr/bin/python3 /root/-TGBot/src/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# 保存后，启用服务
+sudo systemctl daemon-reload
+sudo systemctl enable nanbot
+sudo systemctl start nanbot
+
+# 查看状态
+sudo systemctl status nanbot
+
+# 查看日志
+sudo journalctl -u nanbot -f
+```
+
+> 💡 **这样就算服务器重启了，小南也会自动复活哦~**
+
+---
+
+### 🍎 macOS 部署
+
+> Mac 用户看这里~ 和 Linux 差不多简单！(｡♥‿♥｡)
+
+#### 第一步：安装 Homebrew（包管理器）🍺
+
+```bash
+# 打开终端（Terminal），输入：
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+#### 第二步：安装 Python 🐍
+
+```bash
+# 用 Homebrew 安装 Python 3
+brew install python
+
+# 验证安装
+python3 --version
+pip3 --version
+```
+
+#### 第三步：下载项目 📥
+
+```bash
+# 克隆项目
+git clone https://github.com/SuperNan0724/-TGBot.git
+
+# 进入项目目录
+cd -TGBot
+```
+
+#### 第四步：启动小南！🎉
+
+```bash
+# 方式一：一键启动（推荐~）
+python3 start.py
+
+# 方式二：手动启动
+pip3 install -r src/requirements.txt
+# 编辑 src/config.py 填上配置
+python3 src/main.py
+```
+
+#### 第五步：后台运行（可选~）
+
+```bash
+# 使用 screen
+brew install screen
+screen -S nan
+python3 start.py
+# Ctrl+A → D 分离
+```
+
+---
 
 ### 🎉 小南活过来啦！
 
-看到这样的日志就说明成功啦~
+不管你是 Windows / Linux / Mac，启动成功后都会看到这样的日志~
 
 ```
 ╭─ 🕐 23:25:04 ✦ ⏱ 0s
@@ -161,6 +379,9 @@ python src/main.py
 ```
 
 快去 Telegram 里找你的 Bot 聊天吧！发送 `/start` 试试~ 🎀
+
+> 💖 **恭喜你！你已经成功拥有了一只属于自己的小南！**
+> 接下来去看看功能特色，和小南一起玩吧~ (｡♥‿♥｡)
 
 ---
 
