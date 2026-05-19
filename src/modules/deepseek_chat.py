@@ -6,6 +6,7 @@ import aiohttp
 import json
 import os
 import re
+import random
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,6 +16,7 @@ from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTO
 from .base_module import BaseModule
 from .data_manager import DataManager
 from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
+from .helpers import humanize_reply, send_humanized, get_time_context
 
 logger = logging.getLogger(__name__)
 
@@ -432,7 +434,10 @@ class DeepSeekChat(BaseModule):
             response = await self._call_deepseek_api(messages)
             
             if response:
-                # 保存对话历史
+                # 人性化处理：断句+去AI化
+                response = humanize_reply(response, style="default")
+                
+                # 保存对话历史（保存处理前的原始回复，避免下次对话历史也断句）
                 user_data["history"].append({"role": "user", "content": question})
                 user_data["history"].append({"role": "assistant", "content": response})
                 
@@ -443,7 +448,19 @@ class DeepSeekChat(BaseModule):
                 user_data["last_active"] = datetime.now().isoformat()
                 self.dm.save_user_data(user_id, user_data)
                 
-                await update.message.reply_text(response)
+                # 逐条发送，模拟真人
+                async def send_one(msg: str):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=msg
+                    )
+                await send_humanized(
+                    send_one,
+                    response,
+                    style="default",
+                    min_delay=0.5,
+                    max_delay=1.5
+                )
             else:
                 await update.message.reply_text(
                     "呜… AI 好像走神了(｡•́︿•̀｡)\n"
@@ -459,20 +476,23 @@ class DeepSeekChat(BaseModule):
             )
     
     def _build_messages(self, user_data: dict, personality: str, question: str, user_id: int) -> list:
-        """构建消息列表（包含记忆）~"""
+        """构建消息列表（包含记忆+时间上下文）~"""
         system_prompt = get_prompt(personality, BOT_NAME_SHORT)
+        
+        # 注入当前时间上下文
+        time_context = get_time_context()
         
         # 获取用户的记忆
         user_memories = _get_user_memories(user_id)
         
-        # 构建包含记忆的系统提示
+        # 构建包含记忆和时间信息的系统提示
         memory_prompt = ""
         if user_memories:
             memory_prompt = "\n\n以下是你对这个人的记忆（请记住这些信息）：\n"
             for mem in user_memories:
                 memory_prompt += f"- {mem['content']}\n"
         
-        full_system_prompt = system_prompt + memory_prompt
+        full_system_prompt = system_prompt + "\n\n" + time_context + memory_prompt
         
         messages = [
             {"role": "system", "content": full_system_prompt}

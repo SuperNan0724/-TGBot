@@ -18,6 +18,7 @@ import os
 import asyncio
 import re
 import functools
+import random
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,6 +26,7 @@ from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, f
 
 from .base_module import BaseModule
 from .data_manager import DataManager
+from .helpers import humanize_reply, send_humanized, get_time_context
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +382,11 @@ class GirlfriendModule(BaseModule):
         
         history = self._load_gf_history(user_id)
         
-        messages = [{"role": "system", "content": gf_prompt}]
+        # 注入当前时间上下文，让女友知道现在是几点该说什么
+        time_context = get_time_context()
+        system_content = gf_prompt + "\n\n" + time_context
+        
+        messages = [{"role": "system", "content": system_content}]
         for msg in history[-20:]:
             messages.append(msg)
         messages.append({"role": "user", "content": user_message})
@@ -393,22 +399,29 @@ class GirlfriendModule(BaseModule):
             reply = await ai_module._call_deepseek_api(messages)
             
             if reply:
-                # 强制过滤：删掉所有括号动作和心理描写
-                reply = self._filter_actions(reply)
-                
-                # 如果过滤后啥都没有了，给个默认回复
-                if not reply.strip():
-                    if current_gf == "loli_gf":
-                        reply = "哥哥 人家刚才走神了 你再说一遍好不好🥺"
-                    else:
-                        reply = "嗯 我刚才在想事情 没听清你说的话"
+                # 使用 humanize_reply 强制断句和去AI化
+                style = "loli_gf" if current_gf == "loli_gf" else "moonlight_gf"
+                reply = humanize_reply(reply, style=style)
                 
                 history.append({"role": "user", "content": user_message})
                 history.append({"role": "assistant", "content": reply})
                 if len(history) > 50:
                     history = history[-50:]
                 self._save_gf_history(user_id, history)
-                await self._split_and_send(update, context, reply, current_gf)
+                
+                # 模拟真人逐条发送
+                async def send_one(msg: str):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=msg
+                    )
+                await send_humanized(
+                    send_one,
+                    reply,
+                    style=style,
+                    min_delay=0.8,
+                    max_delay=2.0
+                )
             else:
                 if current_gf == "loli_gf":
                     await update.message.reply_text(

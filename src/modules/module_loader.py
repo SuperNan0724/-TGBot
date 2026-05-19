@@ -19,6 +19,7 @@ EXCLUDED_MODULES = {
     "module_loader",
     "anime_logger",
     "data_manager",
+    "helpers",
 }
 
 # 不可缺失模块（加载失败会阻止机器人启动）
