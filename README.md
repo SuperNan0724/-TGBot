@@ -423,7 +423,8 @@ python start.py
 │   │   ├── module_loader.py    # 📥 模块加载器
 │   │   ├── data_manager.py     # 💾 数据管理器
 │   │   ├── personalities.py    # 🎭 40种性格大全！
-│   │   ├── deepseek_chat.py    # 🤖 AI 对话模块
+│   │   ├── helpers.py          # 🔧 辅助函数（断句、时间感知、逐条发送）
+│   │   ├── deepseek_chat.py    # 🤖 AI 对话模块（带时间感知+自然断句）
 │   │   ├── welcome.py          # 🎉 进群欢迎模块
 │   │   ├── admin.py            # 👑 管理模块
 │   │   ├── help.py             # 📚 帮助模块
@@ -432,7 +433,7 @@ python start.py
 │   │   ├── sticker.py          # 🎨 贴纸模块
 │   │   ├── auto_updater.py     # 🔄 自动更新模块
 │   │   ├── anime_logger.py     # 🌸 二次元日志模块
-│   │   └── girlfriend.py       # 💕 女友模式模块
+│   │   └── girlfriend.py       # 💕 女友模式模块（带时间感知+自然断句）
 │   ├── data/              📂 数据文件（自动生成~）
 │   │   ├── whitelist.json
 │   │   ├── admins.json
