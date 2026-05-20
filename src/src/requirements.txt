@@ -1,4 +1,0 @@
-# 小南专属TGbot 依赖~ 📦
-python-telegram-bot>=20.0
-aiohttp>=3.8.0
-psutil>=5.8.0
