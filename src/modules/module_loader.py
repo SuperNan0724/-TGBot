@@ -24,9 +24,7 @@ EXCLUDED_MODULES = {
 
 # 不可缺失模块（加载失败会阻止机器人启动）
 # 这些是用户端必须有的核心功能模块
-ESSENTIAL_MODULES = {
-    "auto_updater",  # 用户端需要自动更新功能
-}
+ESSENTIAL_MODULES = set()
 
 
 def _snake_to_pascal(name: str) -> str:

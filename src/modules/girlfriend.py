@@ -26,7 +26,7 @@ from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, f
 
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .helpers import humanize_reply, send_humanized, get_time_context
+from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -382,9 +382,10 @@ class GirlfriendModule(BaseModule):
         
         history = self._load_gf_history(user_id)
         
-        # 注入当前时间上下文，让女友知道现在是几点该说什么
+        # 注入当前时间上下文 + 全局常识
         time_context = get_time_context()
-        system_content = gf_prompt + "\n\n" + time_context
+        common_knowledge = get_common_knowledge()
+        system_content = gf_prompt + "\n\n" + time_context + "\n\n" + common_knowledge
         
         messages = [{"role": "system", "content": system_content}]
         for msg in history[-20:]:

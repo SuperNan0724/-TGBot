@@ -16,7 +16,7 @@ from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTO
 from .base_module import BaseModule
 from .data_manager import DataManager
 from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
-from .helpers import humanize_reply, send_humanized, get_time_context
+from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +492,10 @@ class DeepSeekChat(BaseModule):
             for mem in user_memories:
                 memory_prompt += f"- {mem['content']}\n"
         
-        full_system_prompt = system_prompt + "\n\n" + time_context + memory_prompt
+        # 注入全局常识
+        common_knowledge = get_common_knowledge()
+        
+        full_system_prompt = system_prompt + "\n\n" + time_context + "\n\n" + common_knowledge + memory_prompt
         
         messages = [
             {"role": "system", "content": full_system_prompt}
