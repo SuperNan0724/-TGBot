@@ -26,7 +26,7 @@ from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, f
 
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
+from .helpers import humanize_reply, send_humanized, try_send_voice, get_time_context, get_common_knowledge
 
 logger = logging.getLogger(__name__)
 

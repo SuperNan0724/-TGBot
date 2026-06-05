@@ -31,6 +31,15 @@ add_sticker - 收藏贴纸喵～（主人专属喵）
 sticker_list - 查看收藏的贴纸喵～（主人专属喵）
 del_sticker - 删除收藏的贴纸喵～（主人专属喵）
 
+[付费白名单]
+redeem - 兑换激活码使用小南喵～
+check_expiry - 查看我的有效期喵～
+gencode - 生成激活码喵～（主人专属喵）
+codes - 查看所有激活码喵～（主人专属喵）
+revoke - 撤销激活码喵～（主人专属喵）
+paid_users - 付费用户列表喵～（主人专属喵）
+clean_expired - 清理过期用户喵～（主人专属喵）
+
 [管理命令]
 add_user - 添加白名单小鱼干喵～（主人专属喵）
 del_user - 移除小鱼干喵～（主人专属喵）

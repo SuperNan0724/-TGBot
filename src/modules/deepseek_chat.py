@@ -495,7 +495,15 @@ class DeepSeekChat(BaseModule):
         # 注入全局常识
         common_knowledge = get_common_knowledge()
         
-        full_system_prompt = system_prompt + "\n\n" + time_context + "\n\n" + common_knowledge + memory_prompt
+        # 说话规则：禁止括号描写动作/心情
+        speaking_rules = (
+            "\n\n【重要：说话规则】\n"
+            "直接说心情，不要用括号描写动作或表情。\n"
+            "比如开心就说'好开心！'，难过就说'我好难过…'，不要写成'（开心）今天天气真好'或'（叹气）我不知道'这种带括号的描写。\n"
+            "用真人说话的方式交流，想表达什么就直接说出来，像面对面聊天一样自然。"
+        )
+        
+        full_system_prompt = system_prompt + "\n\n" + time_context + "\n\n" + common_knowledge + speaking_rules + memory_prompt
         
         messages = [
             {"role": "system", "content": full_system_prompt}

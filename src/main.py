@@ -69,6 +69,21 @@ class BotApp:
         
         # 注册错误处理器
         self.application.add_error_handler(self.error_handler)
+        
+        # 启动回调服务器（发卡平台对接）
+        self._start_callback_server(loaded_modules)
+    
+    def _start_callback_server(self, loaded_modules: list):
+        """启动发卡平台回调服务器~"""
+        if "paid_whitelist" in loaded_modules:
+            try:
+                paid_module = self.module_loader.get_module("paid_whitelist")
+                if paid_module and hasattr(paid_module, 'start_callback_server'):
+                    paid_module.start_callback_server()
+            except Exception as e:
+                logger.error(f"启动回调服务器失败: {e}")
+        else:
+            logger.info("⏭️ 未加载 paid_whitelist 模块，跳过回调服务器启动")
     
     def get_help_text(self) -> str:
         """获取帮助文本（供模块调用）"""
