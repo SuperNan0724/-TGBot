@@ -4,7 +4,7 @@
 import os
 
 # Telegram Bot 配置
-TELEGRAM_BOT_TOKEN = "7435553023:AAFAVnI8TfkBxnFASZNYyniKj4OE0DwAx1s"  # 从 @BotFather 那里拿到的小钥匙🔑
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # 从 @BotFather 那里拿到的小钥匙🔑
 
 # DeepSeek API 配置
 DEEPSEEK_API_KEY = "sk-0a539536cb6a4a44a4f14e88fdef6ef0"      # 从 DeepSeek 平台获取的魔法钥匙✨
