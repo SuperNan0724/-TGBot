@@ -7,7 +7,7 @@ import os
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # 从 @BotFather 那里拿到的小钥匙🔑
 
 # DeepSeek API 配置
-DEEPSEEK_API_KEY = "sk-0a539536cb6a4a44a4f14e88fdef6ef0"      # 从 DeepSeek 平台获取的魔法钥匙✨
+DEEPSEEK_API_KEY = "YOUR_DEEPSEEK_API_KEY"      # 从 DeepSeek 平台获取的魔法钥匙✨
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
