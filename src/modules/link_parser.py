@@ -253,6 +253,7 @@ class LinkParser(BaseModule):
         self.application = None          # 由 register_handlers 注入
         self.media_parser = None         # 延迟获取（模块按字母序加载，见 _get_media_parser）
         self._last_call = {}
+        self._last_reason = ""            # 最近一次失败原因，用于给用户可操作的报错
         self._enabled = LINK_PARSER_ENABLED
         self._ensure_dirs()
 
@@ -407,6 +408,10 @@ class LinkParser(BaseModule):
         """
         platform = detect_platform(url)
         ext = _url_extension(url)
+
+        # 用于记录失败原因，让报错能说清楚"为什么打不开"，
+        # 而不是笼统一句「小南打不开链接」让用户无从下手。
+        self._last_reason = ""
 
         # 直链的话，用主机名当标签比"网页"清楚得多
         if platform == "网页":
@@ -695,9 +700,18 @@ class LinkParser(BaseModule):
             )
         except asyncio.TimeoutError:
             logger.warning(f"yt-dlp 提取超时: {url}")
+            self._last_reason = "提取超时"
             return None
         except Exception as e:
-            logger.info(f"yt-dlp 无法提取（将回退到网页解析）: {str(e)[:180]}")
+            msg = str(e)[:180]
+            logger.info(f"yt-dlp 无法提取（将回退到网页解析）: {msg}")
+            # 记下原因，供最终报错时用
+            if "Unsupported URL" in msg:
+                self._last_reason = "这个站点不在支持列表里"
+            elif "Unable to download webpage" in msg or "Unable to download" in msg:
+                self._last_reason = "站点拒绝了访问（可能需要登录或被反爬拦截）"
+            else:
+                self._last_reason = "站点解析失败"
             return None
 
     # ── 路径 C：普通网页 Open Graph ────────────────
@@ -706,7 +720,13 @@ class LinkParser(BaseModule):
         """普通网页：读 Open Graph 标签~"""
         html, _, err = await self._http_get(url, max_bytes=512 * 1024, as_text=True)
         if not html:
-            return f"❌ 这个链接小南打不开呢（{err}）\n{url}"
+            reason = self._last_reason or err or "请求失败"
+            return (
+                f"❌ 这个链接小南打不开呢\n"
+                f"   ├─ 平台：{platform}\n"
+                f"   ├─ 原因：{reason}\n"
+                f"   └─ 链接：{url}"
+            )
 
         og = self._parse_open_graph(html)
         title = og.get("title") or og.get("og:title") or ""
@@ -714,7 +734,24 @@ class LinkParser(BaseModule):
         image = og.get("og:image") or og.get("image") or ""
 
         if not (title or desc):
-            return f"🔗 {platform} 页面（没能提取到简介）\n{url}"
+            # 页面能打开但抠不到简介。最常见的两种情况要区分清楚，
+            # 否则用户只会看到一句没头没脑的"打不开"。
+            head = html[:2000].lower()
+            if "<script" in head and "og:" not in head:
+                detail = (
+                    "这个站点的内容是 JS 动态渲染的，页面里没有可读的简介信息"
+                    "（抖音/小红书这类站常见，需要登录态才能解析）"
+                )
+            else:
+                detail = "页面里没有找到简介信息，可能这不是一个内容页"
+
+            lines = [
+                f"🔗 {platform} 页面",
+                "   ├─ 小南打开了页面，但没能提取到内容简介",
+                f"   ├─ 说明：{detail}",
+                f"   └─ 链接：{url}",
+            ]
+            return "\n".join(lines)
 
         lines = [f"🔗 {platform}"]
         if title:
