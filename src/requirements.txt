@@ -1,4 +1,7 @@
 # 小南专属TGbot 依赖~ 📦
 python-telegram-bot>=20.0
 aiohttp>=3.8.0
-psutil>=5.8.0
+psutil>=5.8.0          # 用于精确清理残留的机器人进程（不再依赖已废弃的 wmic）
+
+# 说明：python-telegram-bot 20+ 自带 httpx，无需额外安装 requests。
+# 实测可用版本：python-telegram-bot 22.8 / aiohttp 3.14.5 / psutil 7.2.2（Python 3.13）

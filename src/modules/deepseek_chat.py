@@ -17,6 +17,7 @@ from .base_module import BaseModule
 from .data_manager import DataManager
 from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
 from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
+from .net_helpers import get_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -532,8 +533,18 @@ class DeepSeekChat(BaseModule):
             "max_tokens": 2000
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30) as resp:
+        # aiohttp 默认无视系统代理，必须显式传进去，
+        # 否则在需要代理才能上网的环境里这里会直接超时。
+        proxy = get_proxy_url() or None
+        
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            async with session.post(
+                DEEPSEEK_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120, connect=30),
+                proxy=proxy,
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]

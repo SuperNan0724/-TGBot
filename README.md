@@ -230,6 +230,7 @@ python start.py
 | 功能 | 说明 | 可爱程度 |
 |:----|:-----|:--------:|
 | 🤖 **AI 对话** | 接入 DeepSeek API，智能聊天，还能切换 40 种性格！ | 🌟🌟🌟🌟🌟 |
+| 🎬 **看图看视频** | 发图片或视频给小南，她用多模态视觉看懂内容，再用自己的语气讲给你听~ | 🌟🌟🌟🌟🌟 |
 | 🎭 **性格切换** | 可爱猫咪、傲娇、病娇、魔法少女... 每页 9 种，翻着选！ | 🌟🌟🌟🌟🌟 |
 | 💭 **记忆功能** | 让小南记住重要信息，越聊越懂你~ | 🌟🌟🌟🌟 |
 | 🎉 **进群欢迎** | 新人加入自动欢迎，40+ 条动态欢迎语不重复，2 分钟自动删除！ | 🌟🌟🌟🌟 |
@@ -285,6 +286,92 @@ BOT_OWNER_ID = 123456789                # ← 把数字换成你的 ID！
 > 2. 点击 **START**（开始）
 > 3. 它会直接回复你一串数字，比如：`Your ID: 7609256840`
 > 4. 把这串数字填到 `BOT_OWNER_ID = ` 后面就行啦~
+
+---
+
+### 🌐 关于代理（国内用户必看！）
+
+**这是一个很容易踩的坑**：`python-telegram-bot` 底层用的是 `httpx`，
+而 **httpx 和 aiohttp 默认都不会读取 Windows 系统代理**。
+
+所以会出现这种迷惑现象：
+
+```
+✅ 用浏览器 / curl / PowerShell 都能打开 Telegram
+❌ 机器人一启动就超时崩溃
+```
+
+崩溃日志长这样：
+
+```
+httpx.ConnectTimeout
+telegram.error.TimedOut: Timed out
+Network Retry Loop (Bootstrap Initialize): Failed run number 0 of 0. Aborting.
+```
+
+**解决办法**——在 `config.py` 里填上代理：
+
+```python
+# 方式一：显式填写（最稳妥，推荐）
+PROXY_URL = "http://127.0.0.1:7897"     # 换成你自己代理软件的端口
+PROXY_AUTO_DETECT = True
+
+# 方式二：留空，自动读取系统代理
+PROXY_URL = ""
+PROXY_AUTO_DETECT = True
+```
+
+> 💡 常见代理软件默认端口：Clash `7897` / v2rayN `10809` / Shadowsocks `1080`
+>
+> 自动探测会先读注册表里的系统代理；如果系统代理开关是关的，
+> 它会**再探测一次端口是否真的在监听**——只有端口活着才会使用，
+> 避免把请求导向早就关掉的陈旧代理地址。
+
+---
+
+### 🎬 关于图片和视频解析
+
+小南能"看懂"你发的图片和视频：
+
+| 媒体类型 | 处理方式 |
+|:--------|:--------|
+| 🖼️ 普通图片 | 直接送进多模态视觉模型 |
+| 🎞️ GIF 动图 | GIF 属于受支持格式，直接送 |
+| 🎥 视频 | 用 ffmpeg 均匀抽帧（默认最多 6 帧），多帧一起送进模型 |
+
+**必须注意的两件事：**
+
+**1️⃣ 视觉模型不能填错**
+
+`VISION_MODEL` 必须是支持视觉的模型：
+
+```python
+VISION_MODEL = "deepseek-flash"      # ✅ 正确，当前支持视觉的模型
+# VISION_MODEL = "deepseek-chat"     # ❌ 纯文本模型，发图片会 400 报错
+# VISION_MODEL = "deepseek-reasoner" # ❌ 同上
+```
+
+> 注意：旧模型名 `deepseek-v4-flash-vision-exp` **已下线**，
+> 但请求仍会被最新的 Flash 模型承接，所以填旧名也能用。
+
+**2️⃣ 视频需要 ffmpeg**
+
+没装 ffmpeg 时，视频只能看 Telegram 自带的封面图（低分辨率）。
+想真正"看懂"视频内容，需要安装：
+
+```cmd
+winget install Gyan.FFmpeg
+```
+
+> 如果 `winget` 因为网络问题失败（常见于国内），
+> 可以手动下载 <https://www.gyan.dev/ffmpeg/builds/> 的完整包，
+> 解压后把 `bin` 目录加到系统 PATH 即可。
+> 装完用 `/media` 命令可以查看 ffmpeg 是否被识别到。
+
+**💰 费用提醒**：`deepseek-flash` 是**推理模型**，回答前会先"思考"，
+思考过程同样计入 token。一张图片最多占 1024 tokens，
+所以频繁解析图片会产生费用。默认对非主人用户有 **15 秒调用间隔**限制，
+主人可以用 `/media_off` 随时关掉这个功能。
 
 ---
 
@@ -362,6 +449,12 @@ add_sticker - 收藏贴纸喵～（主人专属喵）
 sticker_list - 查看收藏的贴纸喵～（主人专属喵）
 del_sticker - 删除收藏的贴纸喵～（主人专属喵）
 
+🎬 [媒体解析] 🎬
+media       - 查看图片/视频解析状态喵～
+media_on    - 开启自动解析喵～（主人专属喵）
+media_off   - 关闭自动解析喵～（主人专属喵）
+（直接发图片或视频给小南，她就会看懂并讲给你听~）
+
 👑 [管理命令] 👑
 add_user    - 添加白名单小鱼干喵～
 del_user    - 移除小鱼干喵～
@@ -409,13 +502,16 @@ python start.py
 │   ├── requirements.txt    📦 Python 依赖
 │   │
 │   ├── modules/            🧩 所有功能都在这里！
+│   │   ├── start.py            # ⚠️ 陈旧副本，待删除（不是模块！）
 │   │   ├── __init__.py
 │   │   ├── base_module.py      # 🧬 模块基类
 │   │   ├── module_loader.py    # 📥 自动加载器
 │   │   ├── data_manager.py     # 💾 数据管理器
 │   │   ├── helpers.py          # 🔧 辅助函数
+│   │   ├── net_helpers.py      # 🌐 代理探测（httpx/aiohttp 都不读系统代理）
 │   │   ├── personalities.py    # 🎭 40种性格！
 │   │   ├── deepseek_chat.py    # 🤖 AI 对话
+│   │   ├── media_parser.py     # 🎬 图片/视频解析（多模态视觉）
 │   │   ├── girlfriend.py       # 💕 女友模式
 │   │   ├── welcome.py          # 🎉 进群欢迎
 │   │   ├── admin.py            # 👑 管理模块
@@ -424,13 +520,17 @@ python start.py
 │   │   ├── fun.py              # 🎮 娱乐模块
 │   │   ├── sticker.py          # 🎨 贴纸模块
 │   │   ├── think.py            # 💭 思考模块
+│   │   ├── paid_whitelist.py   # 💰 付费白名单/发卡平台
 │   │   └── anime_logger.py     # 🌸 二次元日志
 │   │
-│   ├── data/              📂 数据文件（自动生成）
+│   ├── config.example.py   📋 配置模板（复制成 config.py 再填）
+│   │
+│   ├── data/              📂 数据文件（自动生成，已被 gitignore）
 │   │   ├── whitelist.json       # 白名单
 │   │   ├── admins.json          # 管理员
 │   │   ├── user_data.json       # 用户数据
 │   │   ├── errors.json          # 错误日志
+│   │   ├── media/               # 媒体解析设置
 │   │   └── backups/             # 备份
 │   │
 │   └── deploy/            🚢 部署文件

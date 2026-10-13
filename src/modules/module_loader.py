@@ -20,6 +20,7 @@ EXCLUDED_MODULES = {
     "anime_logger",
     "data_manager",
     "helpers",
+    "net_helpers",
 }
 
 # 不可缺失模块（加载失败会阻止机器人启动）
@@ -91,6 +92,7 @@ class ModuleLoader:
             List[str]: 成功加载的模块名称列表
         """
         loaded_modules = []
+        failed_modules = []
         module_names = _scan_modules()
         
         logger.info(f"🔍 在 modules/ 目录下发现了 {len(module_names)} 个模块文件~")
@@ -104,27 +106,39 @@ class ModuleLoader:
                 # 查找模块类
                 class_name = _snake_to_pascal(module_name)
                 
-                if hasattr(module, class_name):
-                    module_class = getattr(module, class_name)
-                    module_instance = module_class(bot_app=self)
-                    
-                    # 注册处理器
-                    module_instance.register_handlers(application)
-                    
-                    self.modules[module_name] = module_instance
-                    loaded_modules.append(module_name)
-                    logger.info(f"✅ 模块 '{module_name}' 加载成功~ ✨")
-                else:
-                    error_msg = f"⚠️ 模块 '{module_name}' 中没找到类 '{class_name}' 呢(｡•́︿•̀｡)"
+                if not hasattr(module, class_name):
+                    error_msg = f"没找到类 '{class_name}'"
                     if module_name in ESSENTIAL_MODULES:
                         logger.error(f"❌ 不可缺失模块 '{module_name}' 加载失败，机器人无法启动！")
-                        raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败：找不到类 '{class_name}'")
-                    logger.warning(error_msg)
-                    
+                        raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败：{error_msg}")
+                    logger.warning(f"⏭️ 跳过 '{module_name}'：{error_msg}")
+                    failed_modules.append((module_name, error_msg))
+                    continue
+                
+                module_class = getattr(module, class_name)
+                module_instance = module_class(bot_app=self)
+                
+                # 注册处理器
+                module_instance.register_handlers(application)
+                
+                self.modules[module_name] = module_instance
+                loaded_modules.append(module_name)
+                logger.info(f"✅ 模块 '{module_name}' 加载成功~ ✨")
+                
             except Exception as e:
                 logger.error(f"❌ 加载模块 '{module_name}' 失败啦: {e}")
+                failed_modules.append((module_name, str(e)))
                 if module_name in ESSENTIAL_MODULES:
                     raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败，机器人无法启动！{e}")
+        
+        # 汇总失败项，避免"看起来启动成功、其实功能整块缺失"
+        if failed_modules:
+            logger.warning("=" * 55)
+            logger.warning(f"⚠️ 有 {len(failed_modules)} 个模块未能加载，相关命令将不可用：")
+            for name, reason in failed_modules:
+                logger.warning(f"   ├─ {name}: {reason}")
+            logger.warning("   └─ 机器人会继续运行，但以上模块的功能是缺失的~")
+            logger.warning("=" * 55)
         
         return loaded_modules
     

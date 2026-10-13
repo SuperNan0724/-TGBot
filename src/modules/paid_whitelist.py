@@ -940,6 +940,17 @@ class PaidWhitelist(BaseModule):
             logger.warning("⚠️ 未安装 aiohttp，回调服务器无法启动。请执行: pip install aiohttp")
             return
 
+        # 安全闸门：密钥没配就跑回调服务 = 任何人都能伪造"支付成功"白拿激活码
+        from config import DISABLE_CALLBACK_SERVER_IF_UNSET
+        if CALLBACK_SECRET in ("", "CHANGE_ME_TO_A_RANDOM_SECRET") and DISABLE_CALLBACK_SERVER_IF_UNSET:
+            logger.warning(
+                "🔒 回调服务器未启动：CALLBACK_SECRET 还是占位值\n"
+                "   ├─ 原因：该密钥是回调接口的唯一凭据，用默认值等于没有防护\n"
+                "   ├─ 风险：任何人 POST 一个 completed 回调就能给自己发激活码\n"
+                "   └─ 解决：在 config.py 里把 CALLBACK_SECRET 改成一串随机字符"
+            )
+            return
+
         app = web.Application()
         app.router.add_post("/callback", self._callback_handler)
         app.router.add_get("/health", self._health_handler)

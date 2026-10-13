@@ -183,23 +183,26 @@ def run_config_wizard():
     bot_name = input('请输入机器人名称（直接回车使用"小南专属TGbot"）: ').strip() or "小南专属TGbot"
     
     # 生成配置
+    # 用 %r 写入字符串值：即使名字里带引号也不会破坏生成的 Python 语法
     config_content = f'''"""
 配置文件~ 请在这里填写你的小秘密哦(｡♥‿♥｡)
 """
 import os
 
 # Telegram Bot 配置
-TELEGRAM_BOT_TOKEN = "{token or 'YOUR_TELEGRAM_BOT_TOKEN'}"  # 从 @BotFather 那里拿到的小钥匙🔑
+TELEGRAM_BOT_TOKEN = {token or 'YOUR_TELEGRAM_BOT_TOKEN'!r}  # 从 @BotFather 那里拿到的小钥匙🔑
 
 # DeepSeek API 配置
-DEEPSEEK_API_KEY = "{api_key or 'YOUR_DEEPSEEK_API_KEY'}"      # 从 DeepSeek 平台获取的魔法钥匙✨
+DEEPSEEK_API_KEY = {api_key or 'YOUR_DEEPSEEK_API_KEY'!r}      # 从 DeepSeek 平台获取的魔法钥匙✨
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 # 机器人配置
-BOT_NAME = "{bot_name}"
-BOT_OWNER_NAME = "{owner_name}"  # 主人的名字（会显示在欢迎消息等地方哦~）
+BOT_NAME = {bot_name!r}  # 机器人的全称
+BOT_NAME_SHORT = "小南"      # 机器人的简称（在对话中显示的名字~）
+BOT_OWNER_NAME = {owner_name!r}  # 主人的名字（会显示在欢迎消息等地方哦~）
 BOT_OWNER_ID = {owner_id or 'None'}  # 主人的 Telegram ID（填上才能用主人专属命令哦~）
+DEFAULT_PERSONALITY = "default"  # 默认性格 ID（对应 personalities.py 中的 id）
 MAX_HISTORY_LENGTH = 10  # 每个小可爱最多保留的对话历史条数~
 
 # 数据文件路径
@@ -210,15 +213,20 @@ USER_DATA_FILE = "data/user_data.json"
 ERROR_LOG_FILE = "data/errors.json"
 BACKUP_DIR = "data/backups"
 
+# 付费白名单 / 发卡平台配置
+PAID_WHITELIST_FILE = "data/paid_whitelist.json"
+PRODUCTS_FILE = "data/products.json"
+
+# 发卡平台回调服务器
+# ⚠️ CALLBACK_SECRET 是回调接口的唯一凭据，请改成随机字符串！
+CALLBACK_HOST = "127.0.0.1"
+CALLBACK_PORT = 8080
+CALLBACK_SECRET = "CHANGE_ME_TO_A_RANDOM_SECRET"
+DISABLE_CALLBACK_SERVER_IF_UNSET = True
+
 # 模块配置
-ENABLED_MODULES = [
-    "deepseek_chat",  # DeepSeek AI 对话模块
-    "help",           # 帮助模块
-    "admin",          # 管理模块
-    "system",         # 系统模块
-    "fun",            # 娱乐模块
-    # 在这里添加更多模块吧(๑•̀ㅂ•́)و✧
-]
+# 模块已改为自动扫描加载~
+# 把 .py 文件丢进 src/modules/ 目录就会自动加载啦！(๑•̀ㅂ•́)و✧
 '''
     
     with open(config_path, "w", encoding="utf-8") as f:
@@ -256,39 +264,55 @@ def install_dependencies():
 
 
 def kill_old_bot():
-    """杀掉所有旧机器人进程，防止 Conflict 冲突~"""
-    # Windows：用 taskkill 和 wmic 查杀 python 进程
+    """
+    杀掉**本项目的**旧机器人进程，防止 Conflict 冲突~
+
+    ⚠️ 这里只结束「命令行里带着本项目的 main.py」的进程。
+    以前的老实现是 taskkill /F /IM python.exe，那会把机器上
+    所有 Python 程序统统杀掉（包括正在运行它的启动器自己），
+    所以已经彻底去掉了~
+    """
+    root = get_project_root()
+    src_dir = os.path.join(root, "src")
+    main_marker = "main.py"
+    bot_dir = src_dir if os.path.exists(os.path.join(src_dir, main_marker)) else root
+
+    killed = 0
+
+    # 优先用 psutil 精确匹配
     try:
-        # 方法1：taskkill 杀所有 python.exe
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "python.exe"],
-            capture_output=True, text=True, timeout=5
-        )
-    except:
-        pass
-    try:
-        # 方法2：taskkill 杀所有 pythonw.exe（后台进程）
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "pythonw.exe"],
-            capture_output=True, text=True, timeout=5
-        )
-    except:
-        pass
-    try:
-        # 方法3：用 wmic 查所有含 main.py 的进程
-        result = subprocess.run(
-            ["wmic", "process", "where", 'name="python.exe"', "get", "processid"],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in result.stdout.split("\n"):
-            pid = line.strip()
-            if pid.isdigit():
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", pid],
-                    capture_output=True, text=True, timeout=3
-                )
-    except:
-        pass
+        import psutil
+    except ImportError:
+        psutil = None
+
+    if psutil:
+        me = os.getpid()
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                info = proc.info
+                if info["pid"] == me:
+                    continue
+                if not (info["name"] or "").lower().startswith("python"):
+                    continue
+                cmdline = " ".join(str(a) for a in (info["cmdline"] or []))
+                if main_marker not in cmdline:
+                    continue
+                # 进一步确认路径属于本项目
+                if bot_dir.lower() not in cmdline.lower():
+                    continue
+                proc.kill()
+                proc.wait(timeout=3)
+                killed += 1
+                print(f"{Colors.YELLOW}  🧹 已结束残留进程 PID {info['pid']}{Colors.RESET}")
+            except Exception:
+                continue
+        print(f"{Colors.GREEN}✅ 清理完成，结束了 {killed} 个残留进程~{Colors.RESET}")
+        return
+
+    # psutil 不可用时的兜底：只警告，不做危险的全量查杀
+    print(f"{Colors.YELLOW}⚠️ 未安装 psutil，跳过自动清理旧进程~{Colors.RESET}")
+    print(f"{Colors.YELLOW}   如果出现 Conflict 冲突，请手动结束残留的 python 进程。{Colors.RESET}")
+    print(f"{Colors.YELLOW}   安装 psutil 即可自动处理：pip install psutil{Colors.RESET}")
 
 
 def run_bot():
