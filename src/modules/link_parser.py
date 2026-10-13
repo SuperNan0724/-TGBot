@@ -643,7 +643,7 @@ class LinkParser(BaseModule):
             str | None: 处理完成返回说明文本（可为空串）；未处理返回 None
         """
         try:
-            result = await third_party.parse(url)
+            result = await third_party.parse(url, platform)
         except third_party.ThirdPartyError as e:
             # 接口明确报错，但别急着放弃——让调用方继续试 yt-dlp / OG 兜底。
             # 记下原因，万一后面都失败了好告诉用户。

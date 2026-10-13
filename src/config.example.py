@@ -191,6 +191,29 @@ LINK_THIRD_PARTY_PLATFORMS = ("抖音", "快手", "小红书", "TikTok", "Instag
 LINK_THIRD_PARTY_TIMEOUT = 30
 
 # ══════════════════════════════════════════════
+#  🍪 平台 Cookie（抖音等需要登录态的平台）
+# ══════════════════════════════════════════════
+# 为什么需要它？
+#   抖音有 ArgusSecurityPlugin（自家的风控盾）。不带 cookie 直接请求它的 API：
+#       HTTP 403  "Blocked by ArgusSecurityPlugin Uifid Not Found"
+#   它要的是 Uifid 这类**设备指纹**，纯 HTTP 请求伪造不出来，
+#   必须用真实浏览器登录后拿到的 cookie。
+#
+# 怎么获取（Chrome / Edge）：
+#   1. 浏览器打开 https://www.douyin.com 并登录
+#   2. F12 打开开发者工具 -> Network 标签 -> 刷新页面
+#   3. 点任意一个 douyin.com 的请求 -> Request Headers
+#   4. 找到 Cookie: 那一整行，复制它的值
+#
+# ⚠️ 安全提醒：这个 cookie 等同于你的**登录态**，拿到的人可以操作你的账号。
+#    本文件已被 .gitignore 忽略，不要提交、不要外发。
+#    cookie 会过期，失效后需要重新获取。
+DOUYIN_COOKIE = ""
+
+# 请求抖音时是否带上上面的 cookie
+DOUYIN_USE_COOKIE = True
+
+# ══════════════════════════════════════════════
 #  🎞️ ffmpeg 路径（自动检测失败时才需要手填）
 # ══════════════════════════════════════════════
 # 为什么需要它？

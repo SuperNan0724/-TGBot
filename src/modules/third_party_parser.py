@@ -25,6 +25,7 @@ POST /api/parse」，而且依赖 same-origin Cookie。直接明文请求会得�
 """
 import json
 import logging
+import re
 from urllib.parse import quote
 
 import aiohttp
@@ -273,13 +274,25 @@ def should_use(platform_label: str) -> bool:
     return platform_label in LINK_THIRD_PARTY_PLATFORMS
 
 
-async def parse(url: str):
+async def parse(url: str, platform_label: str = ""):
     """
-    调用第三方接口解析链接~
+    解析链接：抖音走直连（带 Cookie），其它走第三方接口~
 
     Returns:
         dict: normalize() 的结果；失败返回 None
     """
+    # ── 抖音：优先直连（第三方接口对抖音基本无效，实测返回 Url parsing is failed）──
+    if "douyin" in url.lower() or platform_label == "抖音":
+        try:
+            result = await parse_douyin(url)
+            if result:
+                return result
+            logger.info("抖音直连未成功，回退到第三方接口")
+        except ThirdPartyError:
+            raise
+        except Exception as e:
+            logger.warning(f"抖音直连异常: {type(e).__name__}: {str(e)[:120]}")
+
     if not LINK_THIRD_PARTY_ENABLED:
         return None
     if not LINK_THIRD_PARTY_API or "{url}" not in LINK_THIRD_PARTY_API:
@@ -337,3 +350,183 @@ async def parse(url: str):
 
 class ThirdPartyError(Exception):
     """第三方接口明确返回了错误（区别于网络故障）"""
+
+
+# ══════════════════════════════════════════════
+#  抖音直连解析（带 Cookie）
+# ══════════════════════════════════════════════
+#
+# 为什么不只用第三方接口？
+#   实测第三方接口对抖音也返回 "Url parsing is failed!"，因为抖音拦的是
+#   发起请求的**设备指纹**，第三方服务同样过不去。
+#
+# 抖音的风控叫 ArgusSecurityPlugin，不带 cookie 请求它的 API 会得到：
+#     HTTP 403  "Blocked by ArgusSecurityPlugin Uifid Not Found"
+# 它要的是 Uifid 这类设备指纹 —— 纯 HTTP 请求伪造不出来，必须用真实浏览器
+# 登录后拿到的 cookie。
+
+DOUYIN_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+AWEME_ID_RE = re.compile(r"/(?:video|note|share/video|share/note)/(\d{6,25})")
+
+
+def _douyin_cookie() -> str:
+    """取配置里的抖音 cookie~"""
+    try:
+        from config import DOUYIN_COOKIE, DOUYIN_USE_COOKIE
+    except ImportError:
+        return ""
+    if not DOUYIN_USE_COOKIE:
+        return ""
+    return (DOUYIN_COOKIE or "").strip()
+
+
+def _douyin_headers() -> dict:
+    """构造抖音请求头（带 cookie）~"""
+    headers = {
+        "User-Agent": DOUYIN_MOBILE_UA,
+        "Referer": "https://www.douyin.com/",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+    cookie = _douyin_cookie()
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+async def _douyin_resolve_aweme_id(url: str):
+    """
+    把分享短链展开，取出视频 ID（aweme_id）~
+
+    短链会 302 到形如 https://www.douyin.com/video/7123456789012345678
+    """
+    headers = _douyin_headers()
+    proxy = get_proxy_url() or None
+    timeout = aiohttp.ClientTimeout(total=30, connect=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(url, headers=headers, proxy=proxy,
+                                   allow_redirects=True) as resp:
+                final = str(resp.url)
+                # 展开后的 URL 里通常就带 ID
+                m = AWEME_ID_RE.search(final)
+                if m:
+                    return m.group(1)
+
+                # 没带 ID 就翻页面源码找
+                body = await resp.text(errors="replace")
+                m = AWEME_ID_RE.search(body)
+                if m:
+                    return m.group(1)
+                # 有些页面把 ID 放在 aweme_id= 或 itemId=
+                m = re.search(r'(?:aweme_id|itemId|item_id)["\']?\s*[:=]\s*["\']?(\d{6,25})', body)
+                if m:
+                    return m.group(1)
+
+                logger.info(f"抖音短链展开后没找到视频ID，最终URL={final[:120]}")
+                return None
+    except Exception as e:
+        logger.warning(f"抖音短链展开失败: {type(e).__name__}: {str(e)[:120]}")
+        return None
+
+
+async def _douyin_fetch_detail(aweme_id: str):
+    """
+    调抖音详情接口拿数据~
+
+    需要 cookie 才能过 ArgusSecurityPlugin 风控。
+    """
+    cookie = _douyin_cookie()
+    if not cookie:
+        logger.info("未配置 DOUYIN_COOKIE，抖音详情接口大概率会被风控拦截")
+        return None
+
+    api = ("https://www.douyin.com/aweme/v1/web/aweme/detail/"
+           f"?aweme_id={aweme_id}&device_platform=webapp&aid=6383&channel=channel_pc_web")
+    headers = _douyin_headers()
+    headers["Accept"] = "application/json, text/plain, */*"
+    proxy = get_proxy_url() or None
+    timeout = aiohttp.ClientTimeout(total=30, connect=15)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(api, headers=headers, proxy=proxy) as resp:
+                if resp.status != 200:
+                    logger.warning(f"抖音详情接口 HTTP {resp.status}")
+                    return None
+                text = await resp.text(errors="replace")
+                if "ArgusSecurityPlugin" in text or "Uifid Not Found" in text:
+                    raise ThirdPartyError(
+                        "抖音风控拦截（ArgusSecurityPlugin 要求 Uifid）——"
+                        "请在 config.py 里配置 DOUYIN_COOKIE"
+                    )
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning("抖音详情接口返回的不是 JSON（可能又是风控页）")
+                    return None
+                return data
+    except ThirdPartyError:
+        raise
+    except Exception as e:
+        logger.warning(f"抖音详情接口异常: {type(e).__name__}: {str(e)[:120]}")
+        return None
+
+
+async def parse_douyin(url: str):
+    """
+    抖音直连解析（优先），失败返回 None 好让上层回退~
+
+    Returns:
+        dict: normalize() 的结果 或 None
+    """
+    aweme_id = await _douyin_resolve_aweme_id(url)
+    if not aweme_id:
+        return None
+
+    logger.info(f"抖音视频 ID: {aweme_id}")
+
+    data = await _douyin_fetch_detail(aweme_id)
+    if not data:
+        return None
+
+    # 抖音的详情结构：{"aweme_detail": {...}} 或 {"aweme_list": [{...}]}
+    detail = data
+    if isinstance(data, dict):
+        if isinstance(data.get("aweme_detail"), dict):
+            detail = data["aweme_detail"]
+        elif isinstance(data.get("aweme_list"), list) and data["aweme_list"]:
+            detail = data["aweme_list"][0]
+
+    result = normalize({"data": detail})
+
+    # 抖音的图集结构特殊：images 里每项是 {url_list: [...]}
+    if not result.get("images"):
+        imgs = _deep_find(detail, IMAGES_KEYS)
+        if isinstance(imgs, list):
+            urls = []
+            for item in imgs:
+                u = _extract_url_from_value(item)
+                if u:
+                    urls.append(u)
+            result["images"] = urls
+
+    # 视频直链
+    if not result.get("video_url"):
+        play = _deep_find(detail, ("play_addr", "play_addr_h264", "play_addr_265"))
+        u = _extract_url_from_value(play)
+        if u:
+            result["video_url"] = u
+
+    if result.get("video_url") or result.get("images"):
+        logger.info(
+            f"🍪 抖音直连解析成功: 视频={'有' if result['video_url'] else '无'} "
+            f"图集={len(result['images'])}张 标题={result['title'][:40]!r}"
+        )
+        return result
+
+    logger.info("抖音直连拿到数据但没解析出媒体地址")
+    return None
