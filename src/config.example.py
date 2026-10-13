@@ -191,6 +191,31 @@ LINK_THIRD_PARTY_PLATFORMS = ("抖音", "快手", "小红书", "TikTok", "Instag
 LINK_THIRD_PARTY_TIMEOUT = 30
 
 # ══════════════════════════════════════════════
+#  🚫 明确不支持的平台
+# ══════════════════════════════════════════════
+# 这些平台会**直接回复原因**，不再尝试解析（省得白等一轮超时）。
+#
+# 抖音为什么在列表里？实测结论：
+#   抖音的风控叫 ArgusSecurityPlugin，它要求在请求里带 `Uifid`。
+#   而 Uifid **不在 cookie 里** —— 它是页面 JS 运行时生成、作为请求头发出去的。
+#   实测对比（用的是真实浏览器登录后的完整 cookie）：
+#       带 cookie   -> HTTP 403  "Blocked by ArgusSecurityPlugin Uifid Not Found"
+#       不带 cookie -> HTTP 403  "Blocked by ArgusSecurityPlugin Uifid Not Found"
+#   两者**完全相同**，说明抖音压根没校验 cookie。
+#   要过这道风控必须复现它混淆过的 JS + a_bogus 签名算法，
+#   成本高且对方一改版就失效，所以不做。
+LINK_UNSUPPORTED_PLATFORMS = ("抖音", "快手", "小红书")
+
+# 命中不支持平台时回复的话术
+LINK_UNSUPPORTED_REPLY = (
+    "🙏 抱歉，{platform}的链接小南解析不了\n"
+    "   ├─ 原因：该平台的风控要求在请求里带 JS 运行时生成的设备指纹，\n"
+    "   │        普通 HTTP 请求（含配置 Cookie）都会被拦，实测确认\n"
+    "   ├─ 支持：B站 / YouTube / 直链图片视频 / 普通网页 都可以~\n"
+    "   └─ 链接：{url}"
+)
+
+# ══════════════════════════════════════════════
 #  🍪 平台 Cookie（抖音等需要登录态的平台）
 # ══════════════════════════════════════════════
 # 为什么需要它？

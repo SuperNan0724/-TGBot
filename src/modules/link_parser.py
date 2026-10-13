@@ -43,6 +43,7 @@ from config import (
     LINK_PARSER_ENABLED, LINK_MAX_DOWNLOAD_MB, LINK_AI_SUMMARY,
     LINK_COOLDOWN_SECONDS, LINK_MAX_PER_MESSAGE, LINK_EXTRACT_TIMEOUT,
     MEDIA_DATA_DIR,
+    LINK_UNSUPPORTED_PLATFORMS, LINK_UNSUPPORTED_REPLY,
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
@@ -576,6 +577,13 @@ class LinkParser(BaseModule):
                     platform = host[4:] if host.startswith("www.") else host
             except Exception:
                 pass
+
+        # ── 路径 0：已知不支持的平台，直接说明原因 ──
+        # 放在最前面是有意的：这些平台无论怎么试都会失败（风控要求 JS 运行时
+        # 生成的设备指纹），先尝试只会让用户白等一轮超时。
+        if platform in LINK_UNSUPPORTED_PLATFORMS:
+            logger.info(f"⏭️ {platform} 在已知不支持列表里，直接说明原因")
+            return LINK_UNSUPPORTED_REPLY.format(platform=platform, url=url)
 
         # ── 路径 A0：这些平台 yt-dlp 取不到流，走第三方解析接口 ──
         # 必须在 yt-dlp 之前判断，否则会先失败再回退，白等一次超时
