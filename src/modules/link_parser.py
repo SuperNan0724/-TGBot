@@ -432,10 +432,19 @@ class LinkParser(BaseModule):
         if not message or not user or not message.text:
             return
 
+        # 诊断日志：排查"用户发了连接却毫无反应"这类问题时，
+        # 必须先确认 handler 到底有没有被调用（过滤器是否放行）。
+        logger.info(
+            f"🔗 [link_parser] 收到文本消息: {message.text[:60]!r} "
+            f"user={user.id} entities={len(message.entities or [])}"
+        )
+
         if not self._enabled:
+            logger.info("🔗 [link_parser] 功能已关闭，跳过")
             return
 
         if not self._can_use(user.id):
+            logger.info(f"🔗 [link_parser] 用户 {user.id} 不在白名单，跳过")
             await message.reply_text(
                 "呜… 小南现在还不认识你呢(｡•́︿•̀｡)\n"
                 "链接解析要主人允许才能用哦~"
@@ -454,7 +463,10 @@ class LinkParser(BaseModule):
                 urls = [recovered_url]
 
         if not urls:
+            logger.info("🔗 [link_parser] 未识别到链接或编号，交给后续 handler")
             return
+
+        logger.info(f"🔗 [link_parser] 识别到目标: {urls}")
 
         # 记住这个目标，方便用户之后说「解析刚才那个」
         self._last_target[message.chat_id] = urls[0]
@@ -665,13 +677,22 @@ class LinkParser(BaseModule):
         if not media_sent:
             # 下载不了或超限：发纯文字卡片 + 链接按钮
             await message.reply_text(meta_text, reply_markup=buttons, disable_web_page_preview=True)
-            if downloaded_bytes is None and not is_image:
-                # 说明为什么没给文件
+
+            # 说明为什么没给文件——否则用户会以为功能坏了。
+            # 注意这里的嵌套层级：早先写成 elif 挂在"体积超限"分支下面，
+            # 结果下载失败时根本走不到，提示永远不显示。
+            if not is_image:
                 size_hint = info.get("filesize") or info.get("filesize_approx")
                 if size_hint and size_hint > LINK_MAX_DOWNLOAD_MB * 1024 * 1024:
                     await message.reply_text(
                         f"📦 这个视频有 {_human_size(size_hint)}，超过小南的搬运上限"
                         f"（{LINK_MAX_DOWNLOAD_MB}MB），所以只能给你链接啦~"
+                    )
+                elif self._last_reason:
+                    await message.reply_text(
+                        f"⚠️ 视频文件没能下载下来：{self._last_reason}\n"
+                        "   ├─ 上面已经给出封面和简介\n"
+                        "   └─ 可以点按钮直接打开原链接看"
                     )
 
         # ── AI 简介（第二条消息）──
@@ -768,11 +789,28 @@ class LinkParser(BaseModule):
         try:
             await asyncio.to_thread(_run)
         except Exception as e:
-            logger.warning(f"yt-dlp 下载失败: {str(e)[:200]}")
-            # 认真实场景里最常见的原因给个提示
             err = str(e)
-            if "Requested format is not available" in err:
-                logger.warning("   └─ 格式选择器未匹配到可用流（站点可能改了格式列表）")
+            logger.warning(f"yt-dlp 下载失败: {err[:200]}")
+            # 把失败原因分类记下来，好让用户知道是"没救"还是"等会儿就好了"
+            if "No video formats found" in err:
+                # B站最常见：播放流接口被风控/需要登录。
+                # 元数据还能取到（所以卡片和封面图照常显示），但视频下不下来。
+                self._last_reason = (
+                    "取不到视频流（B站风控或需要登录 Cookie）"
+                )
+                logger.warning(
+                    "   └─ 取不到播放流。常见原因：\n"
+                    "      • 请求太频繁被 B站 风控（等一段时间会自己恢复）\n"
+                    "      • 该视频需要登录才能看（大会员/限制内容）\n"
+                    "      • yt-dlp 版本落后于站点改动（pip install -U yt-dlp）"
+                )
+            elif "Requested format is not available" in err:
+                self._last_reason = "格式选择器没匹配到可用流"
+                logger.warning("   └─ 站点可能改了格式列表")
+            elif "HTTP Error 403" in err or "403" in err:
+                self._last_reason = "站点返回 403（被风控拦截）"
+            else:
+                self._last_reason = "视频下载失败"
             return None
 
         # 找出下载到的文件
