@@ -34,7 +34,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    CommandHandler, ContextTypes, MessageHandler, filters, ApplicationHandlerStop,
+)
 
 from config import (
     DEEPSEEK_API_KEY, BOT_NAME_SHORT, DEFAULT_PERSONALITY,
@@ -172,11 +174,16 @@ def _format_id(label: str, value: str) -> str:
 # 这种消息原先完全不会被当成链接，直接掉进普通聊天，机器人只能回
 # 「小南还是打不开呢」——用户看着就像"不识别"。
 #
-# ⚠️ BV 号是**大小写敏感**的：BV1Mopn6NEhD 有效，BV1mopn6NEhD 就是 404。
-#    所以正则必须原样捕获，绝不能做 upper()/lower() 归一化。
+# ⚠️ 大小写规则（API 实测得出，和直觉不一样）：
+#      前缀 "BV" 大小写**不敏感**：BV / Bv / bV / bv 都能查到
+#      后面 10 位 base58 **严格敏感**：BV1Mopn6NEhD 有效，
+#                                    BV1mopn6NEhD 就是 -404
+#    所以：前缀用 re.IGNORECASE 放宽，但捕获到的串必须**原样**交给 API，
+#    绝不做 upper()/lower() 归一化 —— 那会把有效编号改坏。
 BARE_ID_PATTERNS = [
     # 不能用 \b：BV 号可能紧跟在中文后面，中文字符也算 \w，\b 会失配
-    ("BV号", re.compile(r"(?<![0-9A-Za-z])(BV[0-9A-Za-z]{10})(?![0-9A-Za-z])")),
+    ("BV号", re.compile(r"(?<![0-9A-Za-z])(BV[0-9A-Za-z]{10})(?![0-9A-Za-z])",
+                        re.IGNORECASE)),
     ("av号", re.compile(r"(?<![0-9A-Za-z])av(\d{1,12})(?![0-9A-Za-z])", re.IGNORECASE)),
     ("ep号", re.compile(r"(?<![0-9A-Za-z])ep(\d{1,10})(?![0-9A-Za-z])", re.IGNORECASE)),
     ("ss号", re.compile(r"(?<![0-9A-Za-z])ss(\d{1,10})(?![0-9A-Za-z])", re.IGNORECASE)),
@@ -191,6 +198,26 @@ ID_URL_TEMPLATES = {
     "ss号": "https://www.bilibili.com/bangumi/play/ss{id}",
     "am号": "https://www.bilibili.com/audio/am{id}",
 }
+
+
+def _normalize_bv(raw: str) -> str:
+    """
+    把 BV 号的前缀归一到标准写法 "BV"，payload 部分原样保留~
+
+    为什么必须归一前缀？
+      B站 API 对前缀大小写不敏感（Bv / bV / bv 都能查到），
+      但 **yt-dlp 的 BiliBili 提取器不行** —— 实测传 Bv1Mopn6NEhD 会报
+      「Unable to extract initial state」，报错里 ID 甚至变成了 1Mopn6NEhD
+      （前缀被它吞掉了）。所以要在交给 yt-dlp 之前统一成 BV 开头。
+
+    为什么 payload 不能动？
+      前 3 位之后是 base58 编码，**严格区分大小写**：
+      BV1Mopn6NEhD 有效，BV1mopn6NEhD 就是 -404。
+      做 upper()/lower() 归一化会把有效编号改坏。
+    """
+    if not raw:
+        return raw
+    return "BV" + raw[2:]
 
 
 def recover_url_from_id(text: str):
@@ -212,9 +239,9 @@ def recover_url_from_id(text: str):
         template = ID_URL_TEMPLATES.get(label)
         if not template:
             continue
-        # 原样使用捕获到的编号，不做大小写转换（BV 号大小写敏感）
+        # 原样使用捕获到的编号，不做大小写归一化（BV 号的 payload 大小写敏感）
         raw = m.group(1)
-        value = raw if label == "BV号" else raw
+        value = _normalize_bv(raw) if label == "BV号" else raw
         return template.format(id=value), _format_id(label, value)
 
     return None, None
@@ -308,6 +335,7 @@ class LinkParser(BaseModule):
         self.media_parser = None         # 延迟获取（模块按字母序加载，见 _get_media_parser）
         self._last_call = {}
         self._last_reason = ""            # 最近一次失败原因，用于给用户可操作的报错
+        self._last_target = {}            # chat_id -> 最近处理过的 URL/编号，供"解析刚才那个"使用
         self._enabled = LINK_PARSER_ENABLED
         self._ensure_dirs()
 
@@ -356,6 +384,9 @@ class LinkParser(BaseModule):
         ))
 
         application.add_handler(CommandHandler("link", self.link_command))
+        # 中文别名：用户很自然会打「/解析 这个视频」而不是 /link
+        application.add_handler(CommandHandler("parse", self.link_command))
+        application.add_handler(CommandHandler("解析", self.link_command))
         application.add_handler(CommandHandler("link_on", self.link_on_command))
         application.add_handler(CommandHandler("link_off", self.link_off_command))
 
@@ -414,6 +445,9 @@ class LinkParser(BaseModule):
         if not urls:
             return
 
+        # 记住这个目标，方便用户之后说「解析刚才那个」
+        self._last_target[message.chat_id] = urls[0]
+
         left = self._cooldown_left(user.id)
         if left:
             await message.reply_text(f"慢一点嘛~ 还要等 {left} 秒才能再看一个链接哦(｡•́︿•̀｡)")
@@ -451,6 +485,15 @@ class LinkParser(BaseModule):
                 await status.delete()
             except Exception:
                 pass
+
+        # 关键：必须阻断后续 handler，否则 deepseek_chat 也会回一条，
+        # 同一条消息得到两份不相关的回复 —— 用户看到的就是"两个模块抢答"。
+        #
+        # PTB 源码（Application.process_update）里对 ApplicationHandlerStop 的处理是：
+        #     except ApplicationHandlerStop:
+        #         break        # 停掉所有后续 handler，含其它 group
+        # 官方文档也明确：no further handlers (regardless of the group) will be called
+        raise ApplicationHandlerStop
 
     def _extract_urls(self, text: str) -> list:
         """从文本里提取要解析的链接~"""
@@ -1088,24 +1131,66 @@ class LinkParser(BaseModule):
     # ──────────────────────────────────────────
 
     async def link_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/link <url> - 手动解析一个链接~"""
-        if not context.args:
-            await update.message.reply_text(
-                "用法：/link <链接>\n"
-                "或者直接把链接发给我也可以哦~"
+        """
+        /link、/parse、/解析 —— 手动解析一个链接或编号~
+
+        三种用法：
+          1. /link https://...        直接给链接
+          2. /link BV1Mopn6NEhD       直接给编号
+          3. 回复某条消息发 /link      解析那条消息里的链接/编号
+          4. 什么都不带               解析你最近发过的那个
+        """
+        user = update.effective_user
+        message = update.effective_message
+
+        if not self._can_use(user.id):
+            await message.reply_text("呜… 你不在白名单里，暂时用不了这个功能哦~")
+            return
+
+        url = None
+        source = ""
+
+        # 用法1/2：参数里直接给了链接或编号
+        if context.args:
+            candidate = " ".join(context.args)
+            if candidate.lower().startswith(("http://", "https://")):
+                url = candidate
+            else:
+                recovered, label = recover_url_from_id(candidate)
+                if recovered:
+                    url = recovered
+                    source = f"（识别为 {label}）"
+
+        # 用法3：回复某条消息
+        if not url and message.reply_to_message and message.reply_to_message.text:
+            replied = message.reply_to_message.text
+            found = self._extract_urls(replied)
+            if found:
+                url = found[0]
+            else:
+                recovered, label = recover_url_from_id(replied)
+                if recovered:
+                    url = recovered
+                    source = f"（识别为 {label}）"
+
+        # 用法4：什么都没带，用最近提到过的那个
+        if not url:
+            url = self._last_target.get(message.chat_id)
+
+        if not url:
+            await message.reply_text(
+                "小南没找到要解析的内容呢(｡•́︿•̀｡)\n\n"
+                "可以这样用：\n"
+                "  /link https://...      直接给链接\n"
+                "  /link BV1Mopn6NEhD     给视频编号\n"
+                "  回复某条消息发 /link    解析那条消息\n"
+                "  直接把链接或编号发给小南也行~"
             )
             return
-        url = context.args[0]
-        if not url.lower().startswith(("http://", "https://")):
-            await update.message.reply_text("这好像不是一个链接呢(｡•́︿•̀｡)")
-            return
-        user = update.effective_user
-        if not self._can_use(user.id):
-            await update.message.reply_text("呜… 你不在白名单里，暂时用不了这个功能哦~")
-            return
-        status = await update.message.reply_text("🔗 小南正在看…")
+
+        status = await message.reply_text(f"🔗 小南正在看{source}…")
         try:
-            note = await self._process_url(url, user.id, update.effective_message)
+            note = await self._process_url(url, user.id, message)
             if note:
                 await status.edit_text(note)
             else:
@@ -1114,7 +1199,7 @@ class LinkParser(BaseModule):
                 except Exception:
                     pass
         except Exception as e:
-            logger.error(f"/link 解析失败: {e}", exc_info=True)
+            logger.error(f"链接解析命令失败: {e}", exc_info=True)
             await status.edit_text("呜… 这个链接小南看不懂呢(｡•́︿•̀｡)")
 
     async def link_on_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
