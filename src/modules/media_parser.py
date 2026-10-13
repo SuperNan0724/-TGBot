@@ -33,7 +33,7 @@ from config import (
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url
+from .net_helpers import get_proxy_url, find_ffmpeg, has_ffmpeg
 from .personalities import get_prompt
 from .helpers import get_time_context, get_common_knowledge
 
@@ -66,8 +66,14 @@ def _human_size(num_bytes: int) -> str:
 
 
 def _has_ffmpeg() -> bool:
-    """检查 ffmpeg 是否可用~"""
-    return shutil.which("ffmpeg") is not None
+    """
+    检查 ffmpeg 是否可用~
+
+    用 net_helpers 的统一探测（配置 -> PATH -> 用户级注册表 PATH -> 常见位置）。
+    不能只用 shutil.which：如果机器人是在装 ffmpeg 之前启动的终端里运行的，
+    进程继承的 PATH 里没有它，shutil.which 会误判为"没装"。
+    """
+    return has_ffmpeg()
 
 
 def _guess_format(data: bytes) -> str:
@@ -357,8 +363,11 @@ class MediaParser(BaseModule):
                 interval = VIDEO_FRAME_SAMPLE_SECONDS
 
             out_pattern = os.path.join(tmpdir, "frame_%02d.jpg")
+            # 用解析出来的完整路径，而不是裸 "ffmpeg"：
+            # 机器人可能是在装 ffmpeg 之前启动的终端里跑的，PATH 里没有它
+            ffmpeg_exe = find_ffmpeg() or "ffmpeg"
             cmd = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                ffmpeg_exe, "-hide_banner", "-loglevel", "error",
                 "-i", video_path,
                 "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2",
                 "-frames:v", str(max_frames),
@@ -393,7 +402,16 @@ class MediaParser(BaseModule):
 
     async def _probe_duration(self, video_path: str):
         """用 ffprobe 拿视频时长（秒）~"""
-        ffprobe = shutil.which("ffprobe")
+        # 从 ffmpeg 的路径推出同目录下的 ffprobe
+        ffmpeg_exe = find_ffmpeg()
+        if not ffmpeg_exe:
+            return None
+        ffprobe = os.path.join(
+            os.path.dirname(ffmpeg_exe),
+            "ffprobe.exe" if os.name == "nt" else "ffprobe",
+        )
+        if not os.path.isfile(ffprobe):
+            ffprobe = shutil.which("ffprobe")
         if not ffprobe:
             return None
         try:

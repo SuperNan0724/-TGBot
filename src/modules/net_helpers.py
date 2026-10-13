@@ -19,6 +19,9 @@
 `media_parser.py` 和 `deepseek_chat.py` 都从这里取代理设置~
 """
 import logging
+import os
+import re
+import shutil
 import socket
 from urllib.parse import urlparse
 
@@ -157,3 +160,116 @@ def reset_cache():
     global _cached_proxy, _cache_done
     _cached_proxy = None
     _cache_done = False
+
+
+def _expand_env_path(raw_path: str) -> str:
+    """
+    展开 Windows 注册表里那种 %VAR% 写法~（不依赖真实环境变量）
+
+    注册表里的 PATH 常写成 %SystemRoot%\\system32;... 这种形式，
+    而 os.path.expandvars 只认当前进程的环境变量，所以自己解析一遍。
+    """
+    def repl(match):
+        name = match.group(1) or match.group(2)
+        return os.environ.get(name, match.group(0))
+
+    return re.sub(r"%([^%]+)%", repl, raw_path)
+
+
+def _user_path_dirs() -> list:
+    """
+    读取「用户级 PATH」里的目录~
+
+    为什么要单独读注册表？
+      如果机器人是在装了 ffmpeg **之前**启动的终端里运行的，
+      进程继承的 PATH 还是旧的，shutil.which 就找不到 ffmpeg。
+      直接读注册表能拿到最新的值，避免用户被这个坑住。
+    """
+    dirs = []
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            try:
+                raw, _ = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                raw = ""
+        if raw:
+            for part in str(raw).split(";"):
+                part = _expand_env_path(part.strip())
+                if part and os.path.isdir(part):
+                    dirs.append(part)
+    except ImportError:
+        # 非 Windows 平台没有 winreg，正常情况
+        pass
+    except Exception as e:
+        # 不要把异常吞得无声无息——否则排查起来极其痛苦
+        logger.debug(f"读取用户级 PATH 失败: {e}")
+    return dirs
+
+
+def find_ffmpeg() -> str:
+    """
+    定位 ffmpeg 可执行文件~
+
+    顺序：
+      1. config.py 里显式配置的 FFMPEG_PATH（目录或完整 exe 路径）
+      2. 当前进程 PATH
+      3. 用户级 PATH（注册表，解决"装了但当前终端不知道"的问题）
+      4. 常见安装位置
+
+    Returns:
+        str: ffmpeg 可执行文件路径；找不到返回空字符串
+    """
+    exe_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+
+    def _check(candidate: str) -> str:
+        if not candidate:
+            return ""
+        # 直接给了 exe
+        if os.path.isfile(candidate):
+            return candidate
+        # 给了目录
+        candidate_exe = os.path.join(candidate, exe_name)
+        if os.path.isfile(candidate_exe):
+            return candidate_exe
+        return ""
+
+    # 1. 显式配置
+    try:
+        from config import FFMPEG_PATH
+        found = _check((FFMPEG_PATH or "").strip())
+        if found:
+            return found
+    except ImportError:
+        pass
+
+    # 2. 当前 PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    # 3. 用户级 PATH（注册表里的最新值）
+    for d in _user_path_dirs():
+        found = _check(d)
+        if found:
+            return found
+
+    # 4. 常见安装位置
+    common = [
+        r"C:\ffmpeg\bin",
+        r"C:\Program Files\ffmpeg\bin",
+        os.path.expanduser(r"~\ffmpeg\bin"),
+        os.path.expanduser(r"~\scoop\shims"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links"),
+    ]
+    for d in common:
+        found = _check(d)
+        if found:
+            return found
+
+    return ""
+
+
+def has_ffmpeg() -> bool:
+    """是否可用 ffmpeg~"""
+    return bool(find_ffmpeg())

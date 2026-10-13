@@ -397,11 +397,30 @@ class BotApp:
         print(f"{Colors.PINK}{'♥' * 50}{Colors.RESET}")
         print()
         try:
-            # drop_pending_updates=True 清除旧会话冲突
+            # bootstrap_retries 默认是 0 —— 意味着启动时只要连不上 Telegram
+            # 就立刻放弃退出。而国内用代理访问 Telegram，代理节点抖动是常态，
+            # 于是「明明配置都对，却时好时坏起不来」。
+            # 这里给足重试次数，让它自己扛过短暂的网络波动。
             self.application.run_polling(
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
+                drop_pending_updates=True,
+                bootstrap_retries=5,
             )
+        except Exception as e:
+            # 启动期网络问题要给用户明确的排查指引，而不是丢一个 traceback
+            err = str(e)
+            if "TimedOut" in err or "ConnectTimeout" in err or "Timed out" in err:
+                logger.error(
+                    "💔 启动失败：连不上 Telegram 服务器\n"
+                    "   ├─ 原因：网络无法访问 api.telegram.org\n"
+                    "   ├─ 检查1：代理软件是否在正常运行（节点可能失效了）\n"
+                    "   ├─ 检查2：config.py 里的 PROXY_URL 端口是否与代理软件一致\n"
+                    "   ├─ 检查3：浏览器能否打开 https://api.telegram.org\n"
+                    "   └─ 提示：网络恢复后重新运行一次即可~"
+                )
+            else:
+                logger.error(f"💔 启动失败：{err}")
+            raise
         finally:
             self._remove_pid_file()
             logger.info("👋 小南已经休息啦~ 下次再见喵！")

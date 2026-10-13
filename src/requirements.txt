@@ -2,6 +2,14 @@
 python-telegram-bot>=20.0
 aiohttp>=3.8.0
 psutil>=5.8.0          # 用于精确清理残留的机器人进程（不再依赖已废弃的 wmic）
+yt-dlp>=2024.0.0       # 链接解析：覆盖 B站/YouTube/抖音/Twitter 等上千个站点
 
 # 说明：python-telegram-bot 20+ 自带 httpx，无需额外安装 requests。
-# 实测可用版本：python-telegram-bot 22.8 / aiohttp 3.14.5 / psutil 7.2.2（Python 3.13）
+# 实测可用版本：python-telegram-bot 22.8 / aiohttp 3.14.5 /
+#              psutil 7.2.2 / yt-dlp 2026.08.19（Python 3.13）
+#
+# 另外建议安装 ffmpeg（不是 pip 包）：
+#   很多站点（B站尤其）不提供音视频合一的流，必须靠 ffmpeg 合并，
+#   否则这些视频完全下载不下来。装好后可用 /link 命令验证。
+#   winget install Gyan.FFmpeg
+#   或手动下载后把 bin 目录填到 config.py 的 FFMPEG_PATH
