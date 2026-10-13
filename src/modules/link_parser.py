@@ -372,20 +372,34 @@ class LinkParser(BaseModule):
     def register_handlers(self, application):
         self.application = application
 
+        # ⚠️ 关键：必须注册到比其它模块**更低的 group**（优先级更高）！
+        #
+        # PTB 的分发规则（见 Application.process_update 源码）：
+        #     同一 group 内只处理**第一个匹配**的 handler，然后 break。
+        #     不同 group 则都会尝试。
+        #
+        # 模块是按文件名**字母序**加载的：deepseek_chat (d) 排在
+        # link_parser (l) 前面，两者都注册了 MessageHandler(TEXT)。
+        # 结果就是 deepseek_chat 先消费掉消息，link_parser 永远轮不到 ——
+        # 用户发链接/编号只会得到"小南看不懂这个喵"这种聊天回复。
+        #
+        # 用 group=-1 让 link_parser 先跑：
+        #   • 是链接/编号  -> 解析 + raise ApplicationHandlerStop 阻断后续
+        #   • 不是         -> 直接 return，消息照常交给 group 0 的聊天模块
+        LINK_GROUP = -1
+
         # 匹配两类消息：
         #   1. 含完整链接的（Telegram 会给出 url 实体）
         #   2. 只发了裸编号的（比如 BV1Mopn6NEhD）—— 这类没有 url 实体，
         #      只能靠正则认，所以过滤器放宽到所有非命令文本，由处理函数再筛。
-        # 不能只依赖 filters.Entity("url")，否则裸编号永远不触发，
-        # 用户看到的就是"机器人不识别"。
-        application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            self.handle_message,
-        ))
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message),
+            group=LINK_GROUP,
+        )
 
-        application.add_handler(CommandHandler("link", self.link_command))
+        application.add_handler(CommandHandler("link", self.link_command), group=LINK_GROUP)
         # 英文别名 /parse
-        application.add_handler(CommandHandler("parse", self.link_command))
+        application.add_handler(CommandHandler("parse", self.link_command), group=LINK_GROUP)
 
         # 中文别名不能用 CommandHandler！
         # Telegram 只接受 ASCII 小写字母/数字/下划线的命令名，
@@ -393,13 +407,13 @@ class LinkParser(BaseModule):
         #     Command `解析` is not a valid bot command
         # 那会连带整个模块加载失败（实测踩过：模块数从 13 掉到 12，
         # 链接解析功能整个消失）。所以改用文本正则匹配。
-        application.add_handler(MessageHandler(
-            filters.Regex(r"^/(?:解析|分析|parse链接)\b"),
-            self.link_command,
-        ))
+        application.add_handler(
+            MessageHandler(filters.Regex(r"^/(?:解析|分析|parse链接)\b"), self.link_command),
+            group=LINK_GROUP,
+        )
 
-        application.add_handler(CommandHandler("link_on", self.link_on_command))
-        application.add_handler(CommandHandler("link_off", self.link_off_command))
+        application.add_handler(CommandHandler("link_on", self.link_on_command), group=LINK_GROUP)
+        application.add_handler(CommandHandler("link_off", self.link_off_command), group=LINK_GROUP)
 
         logger.info(
             f"🔗 链接解析模块初始化（AI简介: {'开' if LINK_AI_SUMMARY else '关'}, "
