@@ -21,6 +21,7 @@ EXCLUDED_MODULES = {
     "data_manager",
     "helpers",
     "net_helpers",
+    "third_party_parser",
 }
 
 # 不可缺失模块（加载失败会阻止机器人启动）

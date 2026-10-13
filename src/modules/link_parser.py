@@ -47,6 +47,7 @@ from config import (
 from .base_module import BaseModule
 from .data_manager import DataManager
 from .net_helpers import get_proxy_url, find_ffmpeg, apply_thinking_options
+from . import third_party_parser as third_party
 from .personalities import get_prompt
 from .helpers import get_time_context
 
@@ -576,6 +577,14 @@ class LinkParser(BaseModule):
             except Exception:
                 pass
 
+        # ── 路径 A0：这些平台 yt-dlp 取不到流，走第三方解析接口 ──
+        # 必须在 yt-dlp 之前判断，否则会先失败再回退，白等一次超时
+        if third_party.should_use(platform):
+            handled = await self._handle_third_party(url, user_id, message, platform)
+            if handled is not None:
+                return handled
+            # 第三方失败则继续往下走（也许 yt-dlp 或 OG 能兜住）
+
         # ── 路径 A：直链媒体，不走 yt-dlp ──
         if ext in IMAGE_EXTENSIONS or ext in VIDEO_EXTENSIONS:
             return await self._handle_direct(url, user_id, message, platform, ext)
@@ -623,6 +632,110 @@ class LinkParser(BaseModule):
         return f"⚠️ 视频太大发不出来，给你原链接~\n{url}"
 
     # ── 路径 B：yt-dlp 提取 ───────────────────────
+
+    # ── 路径 A0：第三方解析接口 ────────────────────
+
+    async def _handle_third_party(self, url, user_id, message, platform):
+        """
+        用第三方接口解析（抖音/快手/小红书等 yt-dlp 取不到流的平台）~
+
+        Returns:
+            str | None: 处理完成返回说明文本（可为空串）；未处理返回 None
+        """
+        try:
+            result = await third_party.parse(url)
+        except third_party.ThirdPartyError as e:
+            # 接口明确报错，但别急着放弃——让调用方继续试 yt-dlp / OG 兜底。
+            # 记下原因，万一后面都失败了好告诉用户。
+            self._last_reason = f"第三方接口：{e}"
+            logger.info(f"第三方解析未成功，继续回退: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"第三方解析异常: {type(e).__name__}: {e}")
+            return None
+
+        if not result:
+            return None
+
+        title = result.get("title") or ""
+        author = result.get("author") or ""
+        duration = _human_duration(result.get("duration"))
+
+        lines = [f"🔗 {platform}" + (f" · {duration}" if duration else "")]
+        video_id = extract_video_id(url)
+        if video_id:
+            lines.append(f"🆔 {video_id}")
+        if title:
+            lines.append(f"📌 {title[:120]}")
+        if author:
+            lines.append(f"👤 {author}")
+        meta_text = "\n".join(lines)
+
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"🔗 打开原链接（{platform}）", url=url)
+        ]])
+
+        media_sent = False
+        cover_bytes = None
+
+        # 视频
+        if result.get("video_url"):
+            data, ctype, err = await self._http_get(
+                result["video_url"], max_bytes=LINK_MAX_DOWNLOAD_MB * 1024 * 1024
+            )
+            if data:
+                media_sent = await self._send_video(message, data, meta_text[:1000],
+                                                    url, buttons)
+                if not media_sent:
+                    self._last_reason = "视频下载到了但发送失败（可能超过 Telegram 上限）"
+            else:
+                self._last_reason = f"视频下载失败（{err}）"
+
+        # 图集（抖音的"图文作品"就是这种）
+        elif result.get("images"):
+            images = result["images"]
+            sent = 0
+            for idx, img_url in enumerate(images[:10]):     # 最多发 10 张，免得刷屏
+                data, ctype, _ = await self._http_get(img_url, max_bytes=8 * 1024 * 1024)
+                if not data:
+                    continue
+                if idx == 0:
+                    await self._send_photo(message, data, meta_text[:1000], url, buttons)
+                else:
+                    await self._send_photo(message, data, "", url)
+                sent += 1
+            media_sent = sent > 0
+            if not media_sent:
+                self._last_reason = "图集图片都没能下载下来"
+
+        if not media_sent:
+            await message.reply_text(meta_text, reply_markup=buttons,
+                                     disable_web_page_preview=True)
+            if self._last_reason:
+                await message.reply_text(f"⚠️ 媒体没能拿到：{self._last_reason}")
+        else:
+            # 单独抓一张封面留给 AI 简介用
+            if result.get("cover"):
+                cdata, _, _ = await self._http_get(result["cover"], max_bytes=8 * 1024 * 1024)
+                if cdata:
+                    cover_bytes = cdata
+
+        # AI 简介
+        if LINK_AI_SUMMARY and DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "YOUR_DEEPSEEK_API_KEY":
+            try:
+                info_like = {
+                    "title": title,
+                    "uploader": author,
+                    "duration": result.get("duration"),
+                    "webpage_url": url,
+                }
+                summary = await self._ai_summary(info_like, user_id, cover_bytes)
+                if summary:
+                    await message.reply_text(summary)
+            except Exception as e:
+                logger.error(f"AI 简介失败: {e}")
+
+        return ""
 
     async def _handle_extracted(self, url, info, user_id, message, platform) -> str:
         """yt-dlp 提取成功：发媒体 + 元数据 + AI 简介~"""
