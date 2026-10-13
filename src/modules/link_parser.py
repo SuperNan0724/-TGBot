@@ -166,6 +166,60 @@ def _format_id(label: str, value: str) -> str:
     return f"{ID_PREFIX.get(label, '')}{value}"
 
 
+# ── 裸编号识别 ──────────────────────────────────────────────
+#
+# 用户经常只发一个编号（比如 BV1Mopn6NEhD），不带完整 URL。
+# 这种消息原先完全不会被当成链接，直接掉进普通聊天，机器人只能回
+# 「小南还是打不开呢」——用户看着就像"不识别"。
+#
+# ⚠️ BV 号是**大小写敏感**的：BV1Mopn6NEhD 有效，BV1mopn6NEhD 就是 404。
+#    所以正则必须原样捕获，绝不能做 upper()/lower() 归一化。
+BARE_ID_PATTERNS = [
+    # 不能用 \b：BV 号可能紧跟在中文后面，中文字符也算 \w，\b 会失配
+    ("BV号", re.compile(r"(?<![0-9A-Za-z])(BV[0-9A-Za-z]{10})(?![0-9A-Za-z])")),
+    ("av号", re.compile(r"(?<![0-9A-Za-z])av(\d{1,12})(?![0-9A-Za-z])", re.IGNORECASE)),
+    ("ep号", re.compile(r"(?<![0-9A-Za-z])ep(\d{1,10})(?![0-9A-Za-z])", re.IGNORECASE)),
+    ("ss号", re.compile(r"(?<![0-9A-Za-z])ss(\d{1,10})(?![0-9A-Za-z])", re.IGNORECASE)),
+    ("am号", re.compile(r"(?<![0-9A-Za-z])am(\d{1,10})(?![0-9A-Za-z])", re.IGNORECASE)),
+]
+
+# 编号 -> 可解析 URL 的模板
+ID_URL_TEMPLATES = {
+    "BV号": "https://www.bilibili.com/video/{id}",
+    "av号": "https://www.bilibili.com/video/av{id}",
+    "ep号": "https://www.bilibili.com/bangumi/play/ep{id}",
+    "ss号": "https://www.bilibili.com/bangumi/play/ss{id}",
+    "am号": "https://www.bilibili.com/audio/am{id}",
+}
+
+
+def recover_url_from_id(text: str):
+    """
+    从纯文本里认出一个裸视频编号，并还原成可解析的 URL~
+
+    只在消息里**没有完整链接**时才该调用它。
+
+    Returns:
+        (url, 展示用编号) 或 (None, None)
+    """
+    if not text or "http" in text.lower():
+        return None, None
+
+    for label, pattern in BARE_ID_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        template = ID_URL_TEMPLATES.get(label)
+        if not template:
+            continue
+        # 原样使用捕获到的编号，不做大小写转换（BV 号大小写敏感）
+        raw = m.group(1)
+        value = raw if label == "BV号" else raw
+        return template.format(id=value), _format_id(label, value)
+
+    return None, None
+
+
 def extract_video_id(url: str, info: dict = None) -> str:
     """
     取出视频标识（用户口中的"车牌号"）~
@@ -290,9 +344,14 @@ class LinkParser(BaseModule):
     def register_handlers(self, application):
         self.application = application
 
-        # 匹配"含链接的文本消息"
+        # 匹配两类消息：
+        #   1. 含完整链接的（Telegram 会给出 url 实体）
+        #   2. 只发了裸编号的（比如 BV1Mopn6NEhD）—— 这类没有 url 实体，
+        #      只能靠正则认，所以过滤器放宽到所有非命令文本，由处理函数再筛。
+        # 不能只依赖 filters.Entity("url")，否则裸编号永远不触发，
+        # 用户看到的就是"机器人不识别"。
         application.add_handler(MessageHandler(
-            filters.TEXT & filters.Entity("url") & ~filters.COMMAND,
+            filters.TEXT & ~filters.COMMAND,
             self.handle_message,
         ))
 
@@ -342,6 +401,16 @@ class LinkParser(BaseModule):
             return
 
         urls = self._extract_urls(message.text)
+
+        # 没有完整链接时，试试是不是只发了个裸编号（如 BV1Mopn6NEhD）。
+        # 这种情况用户以为发了"链接"，但 Telegram 不会给出 url 实体，
+        # 不还原成 URL 的话消息就掉进普通聊天，表现为"机器人不识别"。
+        recovered_label = ""
+        if not urls:
+            recovered_url, recovered_label = recover_url_from_id(message.text)
+            if recovered_url:
+                urls = [recovered_url]
+
         if not urls:
             return
 
@@ -352,7 +421,12 @@ class LinkParser(BaseModule):
 
         self._last_call[user.id] = time.time()
 
-        status = await message.reply_text(f"🔗 小南正在看这个链接…（共 {len(urls)} 个）")
+        if recovered_label:
+            status = await message.reply_text(
+                f"🔍 认出了 B站编号 {recovered_label}，小南这就去查~"
+            )
+        else:
+            status = await message.reply_text(f"🔗 小南正在看这个链接…（共 {len(urls)} 个）")
 
         results = []
         for idx, url in enumerate(urls, 1):
