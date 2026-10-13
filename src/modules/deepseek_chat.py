@@ -17,7 +17,7 @@ from .base_module import BaseModule
 from .data_manager import DataManager
 from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
 from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
-from .net_helpers import get_proxy_url
+from .net_helpers import get_proxy_url, apply_thinking_options
 
 logger = logging.getLogger(__name__)
 
@@ -409,8 +409,75 @@ class DeepSeekChat(BaseModule):
             if extracted:
                 logger.info(f"自动记忆: 用户{user_id} - {memory}")
         
+        # 如果这句话像是在追问刚发过的那张图，就带着图去问视觉模型，
+        # 而不是当成纯文本聊天（纯文本模式看不到图，只会回"我看不到图呀"）
+        if self._looks_like_image_followup(question) and await self._try_answer_about_image(
+            update, user_id, question
+        ):
+            return
+
         await self._handle_chat(update, context, question)
-    
+
+    # ──────────────────────────────────────────
+    #  图片追问
+    # ──────────────────────────────────────────
+
+    # 出现这些词时，认为用户是在指代"刚才那张图"
+    #
+    # 这份词表是根据真实使用场景补出来的：用户不会规规矩矩说"图里是什么"，
+    # 而是说「请结合现实分析他们在干嘛」——句子里根本没有"图"字。
+    # 所以要同时覆盖"明确指代图片"和"承接上文的追问"两类说法。
+    IMAGE_REFERENCE_WORDS = (
+        # 明确指代图片本身
+        "图里", "图中", "图上", "图内", "这图", "这张图", "那张图", "图片里",
+        "画的", "画里", "画面", "截图里", "海报", "漫画里", "表情包", "照片里",
+        # 承接上文的追问（没提"图"字，但明显是在说刚发的图）
+        "结合现实", "分析他们", "分析一下他们", "他们在干嘛", "他们在干什么",
+        "这画", "这漫画", "这海报", "刚才那", "刚刚那", "上面那", "这个图",
+    )
+
+    def _looks_like_image_followup(self, text: str) -> bool:
+        """
+        判断这句话是不是在追问之前发过的图片~
+
+        宁可漏判也不要误判：误判会把普通聊天也塞进视觉接口，
+        既慢又费额度。所以只在命中明确指代词时才认为是追问。
+        """
+        if not text:
+            return False
+        return any(word in text for word in self.IMAGE_REFERENCE_WORDS)
+
+    async def _try_answer_about_image(self, update: Update, user_id: int, question: str) -> bool:
+        """
+        尝试结合最近缓存的图片回答~
+
+        Returns:
+            bool: 是否已成功作答（True 表示调用方不该再走普通聊天）
+        """
+        try:
+            loader = getattr(self.bot_app, "get_module", None)
+            media = loader("media_parser") if callable(loader) else None
+            if media is None or not hasattr(media, "answer_about_last_image"):
+                return False
+
+            # 没有缓存的图（没发过、或已过期）就直接放弃，交给普通聊天
+            if not media.get_image_context(user_id):
+                return False
+
+            answer = await media.answer_about_last_image(user_id, question)
+            if not answer:
+                return False
+
+            from .helpers import send_humanized
+            # 注意：send_humanized 第一个参数要的是「可调用的回复函数」，
+            # 不是 Message 对象；它内部会自动做 unescape_text
+            await send_humanized(update.message.reply_text, answer)
+            logger.info(f"👁️ 已结合图片上下文回答用户 {user_id} 的追问")
+            return True
+        except Exception as e:
+            logger.warning(f"结合图片回答失败，退回普通聊天: {e}")
+            return False
+
     async def _handle_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE, question: str):
         """处理聊天逻辑~"""
         # 检查 API Key
@@ -532,6 +599,8 @@ class DeepSeekChat(BaseModule):
             "temperature": 0.7,
             "max_tokens": 2000
         }
+        # 思考模式按配置开关（默认关闭：更快更省，且避免思考吃光额度）
+        apply_thinking_options(payload)
         
         # aiohttp 默认无视系统代理，必须显式传进去，
         # 否则在需要代理才能上网的环境里这里会直接超时。

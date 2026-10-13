@@ -44,7 +44,7 @@ from config import (
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url, find_ffmpeg
+from .net_helpers import get_proxy_url, find_ffmpeg, apply_thinking_options
 from .personalities import get_prompt
 from .helpers import get_time_context
 
@@ -982,6 +982,9 @@ class LinkParser(BaseModule):
             "max_tokens": 1200,
             "temperature": 1.0,
         }
+        # 写简介属于描述型任务，不需要推理；关掉思考更快更省，
+        # 也避免思考吃光额度导致正文为空
+        apply_thinking_options(payload)
         headers = {
             "Authorization": f"Bearer {_KEY}",
             "Content-Type": "application/json",
@@ -1000,8 +1003,10 @@ class LinkParser(BaseModule):
 
         msg = data["choices"][0]["message"]
         text = (msg.get("content") or "").strip()
+        # 不要把 reasoning_content 当正文：那是模型内部独白
+        # （详见 media_parser 里同处的说明）
         if not text:
-            text = (msg.get("reasoning_content") or "").strip()[-500:]
+            logger.warning("AI 简介返回空正文（思考可能吃光了 max_tokens）")
         return text
 
     # ──────────────────────────────────────────

@@ -30,10 +30,11 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 from config import (
     DEEPSEEK_API_KEY, BOT_NAME_SHORT, DEFAULT_PERSONALITY,
     VISION_MODEL, MEDIA_DATA_DIR,
+    MEDIA_CONTEXT_TTL, MEDIA_CONTEXT_MAX_BYTES,
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url, find_ffmpeg, has_ffmpeg
+from .net_helpers import get_proxy_url, find_ffmpeg, has_ffmpeg, apply_thinking_options
 from .personalities import get_prompt
 from .helpers import get_time_context, get_common_knowledge
 
@@ -105,6 +106,10 @@ class MediaParser(BaseModule):
         self.dm = DataManager()
         self.application = None       # 由 register_handlers 注入，用来下载 Telegram 文件
         self._last_call = {}          # user_id -> 上次调用时间戳
+        # 最近一次解析过的图片，供后续追问使用
+        #   user_id -> {"data": bytes, "desc": str, "ts": float}
+        # 只放内存不落盘：图片是隐私内容，重启即失也更安全
+        self._image_context = {}
         self._ffmpeg = _has_ffmpeg()
         self._settings = self._load_settings()
         os.makedirs(MEDIA_DATA_DIR, exist_ok=True)
@@ -157,6 +162,78 @@ class MediaParser(BaseModule):
         if elapsed >= cooldown:
             return 0
         return int(cooldown - elapsed) + 1
+
+    # ──────────────────────────────────────────
+    #  图片上下文（供追问使用）
+    # ──────────────────────────────────────────
+
+    def _remember_image(self, user_id: int, data: bytes, desc: str = ""):
+        """
+        记住用户最近发的那张图~
+
+        为什么要存？
+          用户发图 -> 机器人描述 -> 用户接着问「图里那个是什么」
+          如果只把描述当文本丢给 AI，它就看不到图了，只能干瞪眼回
+          「我看不到图呀」——这正是用户实际遇到的问题。
+
+        只放内存不落盘。图片属于隐私内容，而且重启后本来也没必要留着。
+        """
+        try:
+            if not data:
+                return
+            if len(data) > MEDIA_CONTEXT_MAX_BYTES:
+                logger.info(
+                    f"图片 {_human_size(len(data))} 超过追问缓存上限"
+                    f"（{_human_size(MEDIA_CONTEXT_MAX_BYTES)}），不缓存"
+                )
+                return
+            if not _guess_format(data):
+                # 不是受支持的图片格式（比如视频首帧以外的数据），不缓存
+                return
+            self._image_context[user_id] = {
+                "data": data,
+                "desc": desc or "",
+                "ts": time.time(),
+            }
+        except Exception as e:
+            logger.debug(f"缓存图片上下文失败: {e}")
+
+    def get_image_context(self, user_id: int):
+        """
+        取出该用户最近缓存的图片（过期则返回 None）~
+
+        Returns:
+            dict: {"data": bytes, "desc": str}；没有或已过期返回 None
+        """
+        item = self._image_context.get(user_id)
+        if not item:
+            return None
+        if time.time() - item.get("ts", 0) > MEDIA_CONTEXT_TTL:
+            self._image_context.pop(user_id, None)
+            return None
+        return item
+
+    async def answer_about_last_image(self, user_id: int, question: str) -> str:
+        """
+        结合用户最近发的那张图回答问题~
+
+        Returns:
+            str: 回答；没有可用图片或调用失败时返回空字符串
+        """
+        ctx = self.get_image_context(user_id)
+        if not ctx:
+            return ""
+
+        note = (
+            f"对方之前发过一张图，你当时是这样描述的：「{ctx['desc'][:200]}」。\n"
+            f"现在对方针对这张图追问：{question}\n"
+            "请看着图回答这个问题。"
+        )
+        try:
+            return await self._vision_request([ctx["data"]], context_note=note, user_id=user_id)
+        except Exception as e:
+            logger.error(f"结合图片回答失败: {e}")
+            return ""
 
     # ──────────────────────────────────────────
     #  注册处理器
@@ -237,8 +314,10 @@ class MediaParser(BaseModule):
         self._last_call[user.id] = time.time()
 
         try:
+            image_bytes = None
             if kind == "photo":
-                result = await self._analyze_photo(message, user.id)
+                # 照片额外把原始字节带出来，存进上下文供后续追问
+                result, image_bytes = await self._analyze_photo(message, user.id)
             elif kind == "animation":
                 result = await self._analyze_animation(message, user.id)
             else:
@@ -247,6 +326,10 @@ class MediaParser(BaseModule):
             if result is None:
                 await status.edit_text("呜… 这个文件小南拿不到呢(｡•́︿•̀｡)")
                 return
+
+            # 先记住图片再发送，保证用户紧接着追问时上下文已经就位
+            if image_bytes:
+                self._remember_image(user.id, image_bytes, result)
 
             await self._deliver(status, result, user.id)
 
@@ -259,13 +342,19 @@ class MediaParser(BaseModule):
     #  分类型处理
     # ──────────────────────────────────────────
 
-    async def _analyze_photo(self, message, user_id: int) -> str:
-        """解析照片：取最大尺寸那张~"""
+    async def _analyze_photo(self, message, user_id: int):
+        """
+        解析照片：取最大尺寸那张~
+
+        Returns:
+            (描述文本, 图片字节) —— 图片字节供调用方缓存，便于后续追问
+        """
         photo = message.photo[-1]        # Telegram 已按尺寸升序排列
         data = await self._download_file(photo.file_id)
         if data is None:
-            return None
-        return await self._vision_request([data], context_note="这是一张图片", user_id=user_id)
+            return None, None
+        desc = await self._vision_request([data], context_note="这是一张图片", user_id=user_id)
+        return desc, data
 
     async def _analyze_animation(self, message, user_id: int) -> str:
         """解析 GIF 动图：GIF 属于受支持格式，直接送~"""
@@ -494,11 +583,12 @@ class MediaParser(BaseModule):
                 {"role": "system", "content": self._build_system_prompt(user_id)},
                 {"role": "user", "content": content},
             ],
-            # deepseek-flash 是推理模型，思考过程会占用额度，
-            # 给小了会出现"调用成功但回复为空"的情况
+            # 1600 是留给"万一开了思考"的余量；关掉思考后实际只用几十个 token
             "max_tokens": 1600,
             "temperature": 1.0,
         }
+        # 按配置决定是否开启思考（默认关闭，避免思考吃光额度导致正文为空）
+        apply_thinking_options(payload)
 
         headers = {
             "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -526,16 +616,19 @@ class MediaParser(BaseModule):
         message = data["choices"][0]["message"]
         text = (message.get("content") or "").strip()
 
-        # 防御：推理模型偶尔把额度全花在 reasoning 上，导致 content 为空
+        # 防御：如果思考模式没关，模型可能把额度全花在 reasoning 上导致 content 为空。
+        # 这时**不要**把 reasoning_content 当正文发出去 —— 那是模型的内部独白，
+        # 用户会看到「让我再想想」「要确保每句最多20字」这种莫名其妙的内容。
+        # 宁可回一句体面的话，也不泄露思考过程。
         if not text:
-            reasoning = (message.get("reasoning_content") or "").strip()
-            if reasoning:
-                logger.warning("content 为空，退回使用 reasoning_content")
-                text = reasoning[-800:]
-            else:
-                finish = data["choices"][0].get("finish_reason")
-                logger.warning(f"模型返回空内容 (finish_reason={finish})")
-                return "呜… 小南看了半天没看懂，换一张试试好不好~"
+            finish = data["choices"][0].get("finish_reason")
+            reasoning_len = len((message.get("reasoning_content") or ""))
+            logger.warning(
+                f"模型返回空正文 (finish_reason={finish}, 思考内容 {reasoning_len} 字符)"
+                " —— 多半是思考吃光了 max_tokens；"
+                "可在 config.py 里设 DISABLE_THINKING = True 避免"
+            )
+            return "呜… 小南看了半天没看懂，换一张试试好不好~"
 
         usage = data.get("usage", {})
         logger.info(

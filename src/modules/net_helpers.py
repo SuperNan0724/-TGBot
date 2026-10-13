@@ -273,3 +273,38 @@ def find_ffmpeg() -> str:
 def has_ffmpeg() -> bool:
     """是否可用 ffmpeg~"""
     return bool(find_ffmpeg())
+
+
+def apply_thinking_options(payload: dict) -> dict:
+    """
+    按配置给 DeepSeek 请求体加上"思考模式"相关参数~
+
+    为什么需要这个？
+    ────────────────
+    deepseek-flash 默认**开启**思考模式且强度为 high，回答前会先输出一大段
+    思维链，这段内容同样计费。实测同一张图的看图回答：
+
+        思考开启 : 4.1 秒 / 517 completion tokens
+        思考关闭 : 1.3 秒 /  34 completion tokens   ← 回答质量没差别
+
+    更麻烦的是：思考会把 max_tokens 额度吃光，导致 content 为空，
+    而推理内容反倒泄漏出来被当成"正文"发给用户（用户会看到
+    「让我再想想」「要确保每句最多20字」这种模型内部独白）。
+
+    所以描述图片、写简介这类任务一律关闭思考。
+
+    注意：思考模式下 **temperature 不生效**（官方明确说明，传了不报错也没用），
+    所以关闭思考后 temperature 才真正起作用。
+    """
+    try:
+        from config import DISABLE_THINKING, REASONING_EFFORT
+    except ImportError:
+        DISABLE_THINKING, REASONING_EFFORT = True, "low"
+
+    if DISABLE_THINKING:
+        payload["thinking"] = {"type": "disabled"}
+    else:
+        payload["thinking"] = {"type": "enabled"}
+        if REASONING_EFFORT:
+            payload["reasoning_effort"] = REASONING_EFFORT
+    return payload
