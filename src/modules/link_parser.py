@@ -384,9 +384,20 @@ class LinkParser(BaseModule):
         ))
 
         application.add_handler(CommandHandler("link", self.link_command))
-        # 中文别名：用户很自然会打「/解析 这个视频」而不是 /link
+        # 英文别名 /parse
         application.add_handler(CommandHandler("parse", self.link_command))
-        application.add_handler(CommandHandler("解析", self.link_command))
+
+        # 中文别名不能用 CommandHandler！
+        # Telegram 只接受 ASCII 小写字母/数字/下划线的命令名，
+        # CommandHandler("解析") 会让 PTB 直接抛
+        #     Command `解析` is not a valid bot command
+        # 那会连带整个模块加载失败（实测踩过：模块数从 13 掉到 12，
+        # 链接解析功能整个消失）。所以改用文本正则匹配。
+        application.add_handler(MessageHandler(
+            filters.Regex(r"^/(?:解析|分析|parse链接)\b"),
+            self.link_command,
+        ))
+
         application.add_handler(CommandHandler("link_on", self.link_on_command))
         application.add_handler(CommandHandler("link_off", self.link_off_command))
 
@@ -1134,11 +1145,15 @@ class LinkParser(BaseModule):
         """
         /link、/parse、/解析 —— 手动解析一个链接或编号~
 
-        三种用法：
+        四种用法：
           1. /link https://...        直接给链接
           2. /link BV1Mopn6NEhD       直接给编号
           3. 回复某条消息发 /link      解析那条消息里的链接/编号
           4. 什么都不带               解析你最近发过的那个
+
+        注意：参数是从**消息文本**里自己抠的，而不是用 context.args。
+        因为中文别名 /解析 走的是文本正则（Telegram 不允许中文命令名），
+        那种情况下 PTB 不会帮我们切好 args。
         """
         user = update.effective_user
         message = update.effective_message
@@ -1147,16 +1162,20 @@ class LinkParser(BaseModule):
             await message.reply_text("呜… 你不在白名单里，暂时用不了这个功能哦~")
             return
 
+        # 把开头的命令部分（/link、/parse、/解析 …）去掉，剩下的就是参数
+        rest = re.sub(r"^/(?:link|parse|解析|分析)\b\s*", "", message.text or "").strip()
+
         url = None
         source = ""
 
-        # 用法1/2：参数里直接给了链接或编号
-        if context.args:
-            candidate = " ".join(context.args)
-            if candidate.lower().startswith(("http://", "https://")):
-                url = candidate
-            else:
-                recovered, label = recover_url_from_id(candidate)
+        # 用法1/2：参数里是链接或编号
+        if rest:
+            if rest.lower().startswith(("http://", "https://")):
+                found = self._extract_urls(rest)
+                if found:
+                    url = found[0]
+            if not url:
+                recovered, label = recover_url_from_id(rest)
                 if recovered:
                     url = recovered
                     source = f"（识别为 {label}）"
@@ -1201,6 +1220,9 @@ class LinkParser(BaseModule):
         except Exception as e:
             logger.error(f"链接解析命令失败: {e}", exc_info=True)
             await status.edit_text("呜… 这个链接小南看不懂呢(｡•́︿•̀｡)")
+
+        # 手动命令同样要阻断后续，免得 deepseek_chat 又回一条
+        raise ApplicationHandlerStop
 
     async def link_on_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/link_on - 开启链接解析（仅主人）~"""
