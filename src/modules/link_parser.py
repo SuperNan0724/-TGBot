@@ -130,6 +130,82 @@ def detect_platform(url: str) -> str:
     return "网页"
 
 
+# ── 视频标识（"车牌号"）────────────────────────────────────
+#
+# 从 URL 里抠出平台自己的编号，方便用户复制引用。
+# 注意顺序：BV 号要排在 av 号前面，因为 BV 号里可能恰好包含 "av" 字样，
+# 先匹配 av 会误判。
+ID_PATTERNS = [
+    ("BV号", re.compile(r"(BV[0-9A-Za-z]{10})", re.IGNORECASE)),
+    ("av号", re.compile(r"/av(\d+)", re.IGNORECASE)),
+    ("ep号", re.compile(r"/ep(\d+)", re.IGNORECASE)),
+    ("ss号", re.compile(r"/ss(\d+)", re.IGNORECASE)),
+    ("直播间", re.compile(r"live\.bilibili\.com/(\d+)")),
+    ("UID", re.compile(r"space\.bilibili\.com/(\d+)")),
+    ("am号", re.compile(r"/am(\d+)", re.IGNORECASE)),
+    ("au号", re.compile(r"/au(\d+)", re.IGNORECASE)),
+]
+
+# 展示时每个标签对应的前缀。
+# 显式写出来，不要用 label.replace() 去推——那种写法遇到新标签就会出错
+# （比如 "音频au" 去掉"番剧"什么也没去掉，拼出 "音频au12345" 这种鬼东西）。
+ID_PREFIX = {
+    "BV号": "",
+    "av号": "av",
+    "ep号": "ep",
+    "ss号": "ss",
+    "am号": "am",
+    "au号": "au",
+    "直播间": "直播间 ",
+    "UID": "UID ",
+}
+
+
+def _format_id(label: str, value: str) -> str:
+    """把 (标签, 值) 拼成好读的展示字符串~"""
+    return f"{ID_PREFIX.get(label, '')}{value}"
+
+
+def extract_video_id(url: str, info: dict = None) -> str:
+    """
+    取出视频标识（用户口中的"车牌号"）~
+
+    优先用 yt-dlp 给回来的 id，因为那是**平台自己的权威编号**：
+      • 传 av80433022 进去，yt-dlp 的 id 会直接是归一化后的 BV1GJ411x7h7
+        —— 等于白送一个 av -> BV 的换算，不用自己复现那套混淆算法。
+      • 传 b23.tv 短链进去，拿到的是展开后的真实编号。
+    只有拿不到 info 时（比如提取失败、普通网页），才回退到从 URL 里正则抠。
+
+    Returns:
+        str: 形如 "BV1GJ411x7h7" 或 "BV1GJ411x7h7（av80433022）"；取不到返回 ""
+    """
+    yt_id = ""
+    if info:
+        yt_id = str(info.get("id") or info.get("display_id") or "").strip()
+
+    # URL 里的编号（用于补充显示原始形态，例如用户给的是 av 号）
+    url_ids = []
+    for label, pattern in ID_PATTERNS:
+        m = pattern.search(url or "")
+        if not m:
+            continue
+        value = m.group(1)
+        url_ids.append((label, value))
+
+    if yt_id:
+        # 用户给的是 av 号、而 yt-dlp 归一成了 BV 号时，两个都显示出来
+        for label, value in url_ids:
+            if label == "av号" and value not in yt_id:
+                return f"{yt_id}（av{value}）"
+        return yt_id
+
+    if url_ids:
+        label, value = url_ids[0]
+        return _format_id(label, value)
+
+    return ""
+
+
 def _url_extension(url: str) -> str:
     """取 URL 路径部分的扩展名（小写，带点）~"""
     try:
@@ -401,6 +477,12 @@ class LinkParser(BaseModule):
 
         # ── 元数据卡片 ──
         meta_lines = [f"🔗 {platform}" + (f" · {duration}" if duration else "")]
+
+        # 视频标识（"车牌号"）：BV号 / av号 / ep号 等，方便复制引用
+        video_id = extract_video_id(url, info)
+        if video_id:
+            meta_lines.append(f"🆔 {video_id}")
+
         if title:
             meta_lines.append(f"📌 {title[:120]}")
         if uploader:
