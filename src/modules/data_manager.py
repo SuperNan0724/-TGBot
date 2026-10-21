@@ -4,6 +4,7 @@
 import functools
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # 备份目录最多保留多少份（超出后从最旧的开始删）
 MAX_BACKUPS = 20
+# 程序生成的备份文件名格式（backup_20260101_030000.json）。
+# 轮转只认这个精确格式：人工放进 data/backups 的文件绝不能被当成"最旧的备份"删掉。
+_BACKUP_NAME_RE = re.compile(r"backup_(\d{8}_\d{6})\.json")
 # user_data 最多保留多少条用户记录（超出后淘汰最久没活跃的普通用户）
 MAX_USER_RECORDS = 5000
 # 单个用户的历史条数硬上限：各模块自己也会裁（deepseek 用 MAX_HISTORY_LENGTH），
@@ -257,6 +261,11 @@ class DataManager:
         history = data.get("history")
         if isinstance(history, list) and len(history) > MAX_HISTORY_ENTRIES:
             data["history"] = history[-MAX_HISTORY_ENTRIES:]
+        # 保存 = 这个人刚刚还在互动，刷新 last_active。
+        # 不刷新的话，只有 deepseek_chat 会写这个字段，纯女友模式的活跃用户
+        # 会一直停在"创建时间"，超过 5000 条记录时被当成最久没活跃的删掉~
+        data.setdefault("created_at", datetime.now().isoformat())
+        data["last_active"] = datetime.now().isoformat()
         self._data_cache["user_data"][str(user_id)] = data
         # 刚写进去的这条必须排除在淘汰之外：超过上限时它可能正好是"最久没活跃"
         # 的那条，一被删，用户正在聊的这份 personality/history 当场回到默认值~
@@ -386,23 +395,33 @@ class DataManager:
             return None
 
     def _rotate_backups(self):
-        """只保留最近 MAX_BACKUPS 份备份~
+        """只保留最近 MAX_BACKUPS 份**程序自己生成**的备份~
 
         以前只写不删：每天备份一次，一年就是 365 份全量 JSON 躺在 data/backups 里，
-        磁盘一路涨。只删 backup_*.json，别把人工放进去的其它 json 一起清掉~
+        磁盘一路涨。但轮转只能删自己写出来的文件——
+        文件名必须是 backup_YYYYMMDD_HHMMSS.json 这个精确格式，
+        人工放进去的（哪怕也叫 backup_我的存档.json）一律不碰，
+        免得"我手动存了一份"结果被当成最旧的删掉。
         """
         try:
-            names = [
-                name for name in os.listdir(BACKUP_DIR)
-                if name.startswith("backup_") and name.endswith(".json")
-            ]
+            entries = []
+            skipped = 0
+            for name in os.listdir(BACKUP_DIR):
+                match = _BACKUP_NAME_RE.fullmatch(name)
+                if match is None:
+                    if name.startswith("backup_"):
+                        skipped += 1
+                    continue
+                entries.append((match.group(1), name))
         except OSError as e:
             logger.warning(f"备份轮转跳过（列目录失败）：{e}")
             return
-        if len(names) <= MAX_BACKUPS:
+        if skipped:
+            logger.debug(f"备份轮转：跳过了 {skipped} 个非程序生成的文件")
+        if len(entries) <= MAX_BACKUPS:
             return
-        names.sort()  # 文件名带时间戳，字典序就是时间序
-        for name in names[:-MAX_BACKUPS]:
+        entries.sort()  # 时间戳定宽，字典序就是时间序
+        for _, name in entries[:-MAX_BACKUPS]:
             path = os.path.join(BACKUP_DIR, name)
             try:
                 os.remove(path)
