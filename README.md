@@ -28,6 +28,10 @@
 >
 > 程序本体（`src/`）是跨平台的；只有 `start.py` / `start.bat` / `_bothelper.ps1`
 > 这套 Windows 启动器用了 Windows 专属命令。详细步骤见 **[DEPLOY.md](DEPLOY.md)**~ (｡♥‿♥｡)
+>
+> 📮 **只处理私聊和群聊的新消息**：频道帖（`channel_post`）和编辑过的消息不会触发任何命令——
+> 频道帖没有发送者用户，而几乎所有命令都依赖 `user_id`；编辑消息则会让人改一个字就被回复两次。
+> 这两类更新已在订阅层面排除（`main.py` 的 `allowed_updates`），不是靠逐个 handler 加判断。
 
 ---
 

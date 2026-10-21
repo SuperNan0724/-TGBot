@@ -546,8 +546,21 @@ class BotApp:
             # 就立刻放弃退出。而国内用代理访问 Telegram，代理节点抖动是常态，
             # 于是「明明配置都对，却时好时坏起不来」。
             # 这里给足重试次数，让它自己扛过短暂的网络波动。
+            # 只收"新消息"，不订阅这两类更新：
+            #   • channel_post / edited_channel_post：频道帖没有发送者用户
+            #     （effective_user 为 None），而几乎所有命令都要 user_id，
+            #     于是频道里发 /命令 必然 AttributeError 进错误处理器。
+            #   • edited_message：用户改一个字就会再触发一次聊天回复，而且
+            #     这类更新里 update.message 是 None（只有 effective_message），
+            #     各模块写的都是 update.message → 又是一次 AttributeError。
+            # 与其给 60 多个 handler 逐个加守卫，不如从更新源头就不收。
+            # chat_member / my_chat_member 必须保留：welcome 模块靠它做进群欢迎。
+            _allowed_updates = [
+                u for u in Update.ALL_TYPES
+                if u not in ("channel_post", "edited_channel_post", "edited_message")
+            ]
             self.application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
+                allowed_updates=_allowed_updates,
                 drop_pending_updates=True,
                 bootstrap_retries=5,
             )
