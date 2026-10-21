@@ -12,7 +12,6 @@
    如果密钥曾经被提交过，删掉文件是没用的（git 历史里还在），
    必须去 @BotFather 用 /revoke 换一把新的 Token。
 """
-import os
 
 # ══════════════════════════════════════════════
 #  🔑 必填项
@@ -185,6 +184,11 @@ LINK_THIRD_PARTY_ENABLED = True
 LINK_THIRD_PARTY_API = "https://www.tikwm.com/api/?url={url}"
 
 # 哪些平台走第三方接口（这些平台 yt-dlp 基本取不到流）
+#
+# ⚠️ 注意：抖音 / 快手 / 小红书 现在会被下面的 LINK_UNSUPPORTED_PLATFORMS
+#    提前拦掉（那个判断在前），所以这里对它们实际不生效；
+#    真正走第三方接口的只有 TikTok / Instagram。
+#    想放开某个平台，就把它从 LINK_UNSUPPORTED_PLATFORMS 里去掉。
 LINK_THIRD_PARTY_PLATFORMS = ("抖音", "快手", "小红书", "TikTok", "Instagram")
 
 # 接口超时（秒）
@@ -279,6 +283,16 @@ CALLBACK_SECRET = "CHANGE_ME_TO_A_RANDOM_SECRET"
 
 # 密钥还是占位值时，是否禁止启动回调服务器（强烈建议保持 True）
 DISABLE_CALLBACK_SERVER_IF_UNSET = True
+
+# ══════════════════════════════════════════════
+#  🔊 自动语音
+# ══════════════════════════════════════════════
+# 机器人回复文字时，有一定概率再补发一条语音（概率见 modules/helpers.py 里的
+# VOICE_CHANCE_SHORT / MEDIUM / LONG，只对 300 字以内的短回复生效）。
+#
+# 代码已经写好了，但默认**关闭**：语音需要 TTS 服务，既花额度又慢，
+# 而且还可能被 Telegram 限流。想开就改成 False。
+DISABLE_AUTO_VOICE = True
 
 # ══════════════════════════════════════════════
 #  🧩 模块配置

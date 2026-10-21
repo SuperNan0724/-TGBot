@@ -1,0 +1,7 @@
+# 脚本行尾必须固定，否则换台机器就坏
+#
+# .sh 用 CRLF 时，Linux / WSL 会报：
+#   /bin/bash^M: bad interpreter: No such file or directory
+# 而本脚本注释里明确写着「适用于 Linux / macOS / WSL」，
+# Windows 上 clone 出来的是 CRLF 版本，拖进 WSL 直接跑不了。
+*.sh text eol=lf

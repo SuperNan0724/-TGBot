@@ -15,7 +15,6 @@
 安全：脚本只打印 cookie 的**长度**和**字段名**，不打印完整值，
       避免凭据出现在终端回滚缓冲或日志里。
 """
-import json
 import os
 import re
 import sqlite3  # noqa: F401  (不使用，仅保持导入顺序稳定)
@@ -116,7 +115,7 @@ def step3_write(raw: str) -> bool:
     with open(CONFIG, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"      ✅ 已写入 {CONFIG}")
-    print(f"         （该文件已被 .gitignore 忽略，不会提交到仓库）")
+    print("         （该文件已被 .gitignore 忽略，不会提交到仓库）")
     return True
 
 
@@ -182,6 +181,13 @@ def main():
     print("  抖音 Cookie 配置工具")
     print("=" * 66)
     print()
+    print("⚠️ 重要：抖音链接当前**不会被解析**。")
+    print("   最新表态见 README「🚫 明确不支持的平台」一节：抖音的风控要求在请求里带")
+    print("   浏览器 JS 运行时生成的设备指纹（Uifid），普通 HTTP 请求带着完整 cookie")
+    print("   也会被 403 拦掉，所以代码里会直接回复原因、不再尝试解析。")
+    print("   本工具保留下来只用于：写入 DOUYIN_COOKIE 配置项、以及日后风控变化时")
+    print("   重新做实测。它的第 4 步会真实请求一次接口，用来观察现在能不能过风控。")
+    print()
 
     if len(sys.argv) > 1:
         raw = " ".join(sys.argv[1:])
@@ -218,10 +224,12 @@ def main():
     print()
     print("=" * 66)
     if ok:
-        print("结果: ✅ 全部通过，抖音解析应该可以用了")
+        print("结果: ✅ cookie 写好了，而且这次实测确实过了风控")
+        print("      但机器人仍然会拒绝抖音链接（LINK_UNSUPPORTED_PLATFORMS 在前拦截）")
+        print("      想真正放开，需要先把它从 config.py 的该列表里去掉")
     else:
         print("结果: ⚠️ cookie 已写入，但实测未通过（详见上面的原因）")
-        print("      可以重新获取一份更完整的 cookie 再跑一次本脚本")
+        print("      这就是当前抖音不支持的原因；风控变化时可以重跑本脚本观察")
     print("=" * 66)
     return 0 if ok else 2
 

@@ -4,6 +4,8 @@
 import json
 import os
 import shutil
+import tempfile
+import time
 import logging
 from datetime import datetime
 from typing import Optional, Any
@@ -51,20 +53,59 @@ class DataManager:
     
     def _load_json(self, filepath: str, default: Any) -> Any:
         """加载 JSON 文件~"""
+        if not os.path.exists(filepath):
+            return default
         try:
-            if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8") as f:
-                    return json.load(f)
+            # utf-8-sig：记事本另存为「UTF-8 带 BOM」时，json.load 会报
+            # Unexpected UTF-8 BOM，整个文件被当成不存在、数据全丢
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                return json.load(f)
         except Exception as e:
             logger.error(f"加载 {filepath} 失败啦: {e}")
+            # 损坏的文件先改名留底，否则下一次保存会直接把它覆盖掉，
+            # 用户的白名单/对话历史就再也找不回来了
+            try:
+                broken = f"{filepath}.broken-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                os.replace(filepath, broken)
+                logger.error(f"💾 已保留损坏的文件为 {broken}，可手动检查后恢复~")
+            except Exception as e2:
+                logger.error(f"保留损坏文件失败: {e2}")
         return default
-    
+
     def _save_json(self, filepath: str, data: Any):
         """保存 JSON 文件~"""
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            dirname = os.path.dirname(filepath)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            # 先写同目录下的临时文件，再 os.replace 原子替换：
+            # 1) 写到一半崩溃/断电不会把原文件毁掉（旧写法 open("w") 会立刻清空文件）
+            # 2) 发卡平台回调线程和主事件循环可能同时保存，用唯一临时文件
+            #    才不会互相踩到对方写了一半的内容
+            fd, tmp_path = tempfile.mkstemp(
+                dir=dirname or ".", prefix=os.path.basename(filepath) + ".", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # Windows 上目标文件可能正好被读线程打开着，这时 os.replace
+                # 会抛 PermissionError，等一下重试即可
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp_path, filepath)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
             return True
         except Exception as e:
             logger.error(f"保存 {filepath} 失败啦: {e}")

@@ -117,6 +117,10 @@ class AnimeFormatter(logging.Formatter):
         """格式化日志记录~"""
         # 获取原始消息
         message = record.getMessage()
+
+        # 带上异常堆栈，否则 exc_info=True 的内容会被整个丢掉、报错时看不到调用栈喵~
+        if record.exc_info:
+            message += "\n" + self.formatException(record.exc_info)
         
         # 获取可爱的模块名
         module_name = self._get_cute_module_name(record.name)

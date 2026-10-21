@@ -5,7 +5,7 @@ import logging
 import random
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
@@ -164,8 +164,8 @@ class Fun(BaseModule):
         user_choice = choice_map.get(user_choice.lower(), None)
         if not user_choice:
             await update.message.reply_text(
-                f"😅 要出石头、剪刀或布哦~\n"
-                f"小南等你重新出招：/rps 石头"
+                "😅 要出石头、剪刀或布哦~\n"
+                "小南等你重新出招：/rps 石头"
             )
             return
         
@@ -325,8 +325,8 @@ class Fun(BaseModule):
             f"小南掐指一算，{user_name}今天会遇到好事~",
             f"这个签说明{user_name}最近运气不错！",
             f"小南觉得{user_name}今天要开心哦~",
-            f"这个签的意思是… 嗯… 天机不可泄露！",
-            f"小南偷偷告诉你，这个签其实很准的！"
+            "这个签的意思是… 嗯… 天机不可泄露！",
+            "小南偷偷告诉你，这个签其实很准的！"
         ]
         
         await update.message.reply_text(
@@ -350,20 +350,20 @@ class Fun(BaseModule):
         chosen = random.choice(choices)
         
         reasons = [
-            f"这个看起来最好吃！", f"小南觉得这个最适合你~",
-            f"命运在向你招手哦！", f"就决定是你了！",
-            f"这个！这个！选这个！", f"小南掐指一算，就是这个了！",
-            f"听小南的准没错~", f"这个运气最好！",
-            f"小南的直觉告诉我是这个！", f"这个选项在闪闪发光呢~",
-            f"小南偷偷投了这个一票！", f"这个！不接受反驳！"
+            "这个看起来最好吃！", "小南觉得这个最适合你~",
+            "命运在向你招手哦！", "就决定是你了！",
+            "这个！这个！选这个！", "小南掐指一算，就是这个了！",
+            "听小南的准没错~", "这个运气最好！",
+            "小南的直觉告诉我是这个！", "这个选项在闪闪发光呢~",
+            "小南偷偷投了这个一票！", "这个！不接受反驳！"
         ]
         
         reactions = [
-            f"🎯 就它了！",
-            f"✨ 小南推荐这个！",
-            f"💫 选这个准没错！",
-            f"🌟 这个！这个！",
-            f"⭐ 小南选了这个！"
+            "🎯 就它了！",
+            "✨ 小南推荐这个！",
+            "💫 选这个准没错！",
+            "🌟 这个！这个！",
+            "⭐ 小南选了这个！"
         ]
         
         await update.message.reply_text(
@@ -486,8 +486,8 @@ class Fun(BaseModule):
                 )
             else:
                 await update.message.reply_text(
-                    f"😅 不知道要做什么呢~\n"
-                    f"试试：/pet feed /pet play /pet sleep"
+                    "😅 不知道要做什么呢~\n"
+                    "试试：/pet feed /pet play /pet sleep"
                 )
             return
         
@@ -620,9 +620,9 @@ class Fun(BaseModule):
             return
         
         await update.message.reply_text(
-            f"💣 扫雷小游戏\n"
-            f"/minesweeper new - 新游戏\n"
-            f"/minesweeper open 行 列 - 翻开格子"
+            "💣 扫雷小游戏\n"
+            "/minesweeper new - 新游戏\n"
+            "/minesweeper open 行 列 - 翻开格子"
         )
     
     async def blackjack(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -748,19 +748,19 @@ class Fun(BaseModule):
             return
         
         await update.message.reply_text(
-            f"🃏 21点小游戏\n"
-            f"/blackjack new - 新游戏\n"
-            f"/blackjack hit - 要牌\n"
-            f"/blackjack stand - 停牌"
+            "🃏 21点小游戏\n"
+            "/blackjack new - 新游戏\n"
+            "/blackjack hit - 要牌\n"
+            "/blackjack stand - 停牌"
         )
     
     async def truth_or_dare(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/truth_or_dare - 真心话大冒险喵～"""
         if not context.args:
             await update.message.reply_text(
-                f"🎭 真心话大冒险~\n"
-                f"/truth_or_dare truth - 真心话\n"
-                f"/truth_or_dare dare - 大冒险"
+                "🎭 真心话大冒险~\n"
+                "/truth_or_dare truth - 真心话\n"
+                "/truth_or_dare dare - 大冒险"
             )
             return
         
@@ -898,9 +898,9 @@ class Fun(BaseModule):
         """/8ball - 魔法8球喵～"""
         if not context.args:
             await update.message.reply_text(
-                f"🔮 魔法8球~\n"
-                f"问小南一个问题吧！\n"
-                f"用法：/8ball 你的问题"
+                "🔮 魔法8球~\n"
+                "问小南一个问题吧！\n"
+                "用法：/8ball 你的问题"
             )
             return
         
@@ -944,9 +944,9 @@ class Fun(BaseModule):
         
         if not context.args:
             await update.message.reply_text(
-                f"⭐ 星座运势~\n"
-                f"用法：/horoscope 星座名称\n"
-                f"例如：/horoscope 白羊座"
+                "⭐ 星座运势~\n"
+                "用法：/horoscope 星座名称\n"
+                "例如：/horoscope 白羊座"
             )
             return
         

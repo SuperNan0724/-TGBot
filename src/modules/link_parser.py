@@ -23,11 +23,10 @@
 """
 import asyncio
 import ipaddress
-import json
 import logging
 import os
 import re
-import socket
+import shutil
 import tempfile
 import time
 from urllib.parse import urlparse
@@ -806,6 +805,8 @@ class LinkParser(BaseModule):
                 finally:
                     try:
                         os.remove(path)
+                        # 连空目录一起删，否则每解析一个视频就在 %TEMP% 里留一个空壳
+                        os.rmdir(os.path.dirname(path))
                     except Exception:
                         pass
 
@@ -833,9 +834,11 @@ class LinkParser(BaseModule):
         # ── AI 简介（第二条消息）──
         if LINK_AI_SUMMARY and DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "YOUR_DEEPSEEK_API_KEY":
             try:
-                cover = None
+                # 图片型结果上面已经下载过原图，直接拿来当简介的配图，
+                # 否则要多下一次缩略图（白费带宽，缩略图还常带时效签名失败）
+                cover = downloaded_bytes
                 thumb = info.get("thumbnail")
-                if thumb and self._get_media_parser():
+                if cover is None and thumb and self._get_media_parser():
                     cdata, _, _ = await self._http_get(thumb, max_bytes=8 * 1024 * 1024)
                     if cdata:
                         cover = cdata
@@ -864,6 +867,10 @@ class LinkParser(BaseModule):
 
         tmpdir = tempfile.mkdtemp(prefix="nan_link_")
         outtmpl = os.path.join(tmpdir, "media.%(ext)s")
+
+        def _cleanup():
+            """删除临时目录~（失败路径不清的话 %TEMP% 里会堆满下了一半的视频）"""
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
         # 格式选择策略（顺序尝试，越靠前越优先）：
         #   1. 单文件 mp4 —— 无需 ffmpeg 合并，最快最稳
@@ -946,6 +953,7 @@ class LinkParser(BaseModule):
                 self._last_reason = "站点返回 403（被风控拦截）"
             else:
                 self._last_reason = "视频下载失败"
+            _cleanup()
             return None
 
         # 找出下载到的文件
@@ -953,6 +961,7 @@ class LinkParser(BaseModule):
             files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
             files = [f for f in files if os.path.isfile(f)]
             if not files:
+                _cleanup()
                 return None
             # 取最大的那个（可能残留 .part）
             files.sort(key=os.path.getsize, reverse=True)
@@ -969,6 +978,7 @@ class LinkParser(BaseModule):
             return path, size
         except Exception as e:
             logger.error(f"检查下载结果失败: {e}")
+            _cleanup()
             return None
 
     async def _extract_info(self, url: str):
@@ -1336,7 +1346,7 @@ class LinkParser(BaseModule):
             return
 
         # 把开头的命令部分（/link、/parse、/解析 …）去掉，剩下的就是参数
-        rest = re.sub(r"^/(?:link|parse|解析|分析)\b\s*", "", message.text or "").strip()
+        rest = re.sub(r"^/(?:link|parse|解析|分析)(?:@\w+)?\b\s*", "", message.text or "").strip()
 
         url = None
         source = ""

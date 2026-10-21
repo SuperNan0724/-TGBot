@@ -15,7 +15,7 @@ from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
 
-from config import PAID_WHITELIST_FILE, PRODUCTS_FILE, CALLBACK_HOST, CALLBACK_PORT, CALLBACK_SECRET, TELEGRAM_BOT_TOKEN
+from config import PAID_WHITELIST_FILE, PRODUCTS_FILE, CALLBACK_HOST, CALLBACK_PORT, CALLBACK_SECRET
 from .base_module import BaseModule
 from .data_manager import DataManager
 
@@ -38,23 +38,55 @@ def _generate_code(length: int = 8) -> str:
     return "".join(random.choices(chars, k=length))
 
 
+def _quarantine_broken_file(path: str):
+    """读不出来的数据文件先改名留档，免得下一次保存把它彻底覆盖掉~"""
+    try:
+        broken = f"{path}.broken-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        os.replace(path, broken)
+        logger.warning(f"⚠️ 数据文件无法解析，已备份到 {broken}（请人工检查）")
+    except Exception as e:
+        logger.error(f"备份损坏的数据文件失败: {e}")
+
+
+# 主线程（命令）和回调服务器线程都会写这两个 JSON，串行化避免互相踩踏~
+_SAVE_LOCK = threading.Lock()
+
+
+def _write_json_atomic(path: str, data: dict):
+    """原子写 JSON：先写临时文件再整体替换，避免中途崩溃留下半个文件~"""
+    parent = os.path.dirname(path)
+    with _SAVE_LOCK:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+
+
 def _load_paid_data() -> dict:
     """加载付费白名单数据~"""
     if os.path.exists(PAID_WHITELIST_FILE):
         try:
             with open(PAID_WHITELIST_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict):
+                data.setdefault("codes", [])
+                data.setdefault("paid_users", {})
+                return data
+            logger.error(f"付费白名单数据格式不对（顶层应为对象）: {type(data).__name__}")
         except Exception as e:
             logger.error(f"加载付费白名单数据失败: {e}")
+        _quarantine_broken_file(PAID_WHITELIST_FILE)
     return {"codes": [], "paid_users": {}}
 
 
 def _save_paid_data(data: dict):
     """保存付费白名单数据~"""
     try:
-        os.makedirs(os.path.dirname(PAID_WHITELIST_FILE), exist_ok=True)
-        with open(PAID_WHITELIST_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _write_json_atomic(PAID_WHITELIST_FILE, data)
         return True
     except Exception as e:
         logger.error(f"保存付费白名单数据失败: {e}")
@@ -66,18 +98,20 @@ def _load_products() -> dict:
     if os.path.exists(PRODUCTS_FILE):
         try:
             with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            logger.error(f"商品配置格式不对（顶层应为对象）: {type(data).__name__}")
         except Exception as e:
             logger.error(f"加载商品配置失败: {e}")
+        _quarantine_broken_file(PRODUCTS_FILE)
     return {"products": []}
 
 
 def _save_products(data: dict):
     """保存商品配置~"""
     try:
-        os.makedirs(os.path.dirname(PRODUCTS_FILE), exist_ok=True)
-        with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _write_json_atomic(PRODUCTS_FILE, data)
         return True
     except Exception as e:
         logger.error(f"保存商品配置失败: {e}")
@@ -189,6 +223,9 @@ class PaidWhitelist(BaseModule):
 
         # 保存 application 供回调服务使用
         self.__class__._application = application
+
+        # 启动时清理已过期的付费用户（原先没人调用，过期用户会一直留在白名单里）
+        auto_cleanup()
 
     # ──────────────────────────────────────────
     #  用户端命令
@@ -564,7 +601,7 @@ class PaidWhitelist(BaseModule):
                 InlineKeyboardButton("❌ 取消", callback_data="paid_revoke_cancel")
             ]]
             await update.message.reply_text(
-                f"⚠️ 这个激活码已被使用！强行撤销不会影响已用用户，但会标记无效。确认吗？",
+                "⚠️ 这个激活码已被使用！强行撤销不会影响已用用户，但会标记无效。确认吗？",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
@@ -758,6 +795,10 @@ class PaidWhitelist(BaseModule):
             return
 
         if data.startswith("paid_revoke_confirm_"):
+            # 确认按钮可能出现在群里/被转发，点的人不一定是主人，这里必须重新校验
+            if not self.dm.is_owner(update.effective_user.id):
+                await query.edit_message_text("呜… 只有主人才能撤销激活码哦！")
+                return
             code = data.replace("paid_revoke_confirm_", "")
             found = None
             for i, c in enumerate(self._data.get("codes", [])):

@@ -75,7 +75,7 @@ EMOJI_REPLIES = {
     "😂": ["笑到流泪的贴纸！小南也笑死啦~", "哈哈哈哈这个贴纸太搞笑了！"],
     "🤣": ["笑到打滚的贴纸！小南也笑翻啦~", "笑死啦~ 这个贴纸太有趣了！"],
     "😍": ["哇~ 这个贴纸好可爱！小南也心动了！", "心动的贴纸！小南也好喜欢！"],
-    "🥰": ["好甜好甜的贴纸~ 小南被治愈了！", "治愈系贴纸！小南满血复活！"],
+    "🥰": ["好甜好甜的贴纸~ 小南被治愈了！", "治愈系贴纸！小南满血复活！", "好可爱的贴纸！小南被萌翻了！", "可爱到犯规的贴纸！小南血条清空！"],
     "😘": ["飞吻贴纸！小南接住啦~ 啾咪！", "收到飞吻~ 小南也亲亲你！"],
     "😋": ["好吃的贴纸~ 小南也想吃！", "看起来好好吃的贴纸！小南馋了~"],
     "😎": ["酷酷的贴纸！小南也觉得好帅！", "帅气的贴纸~ 小南被帅到了！"],
@@ -115,7 +115,7 @@ EMOJI_REPLIES = {
     "😲": ["目瞪口呆的贴纸！小南也愣住了！", "好惊讶的贴纸~ 小南也吓了一跳！"],
     
     # 🥰 可爱/治愈类
-    "🥰": ["好可爱的贴纸！小南被萌翻了！", "可爱到犯规的贴纸！小南血条清空！"],
+    # 注：🥰 的这两句已并进上面的「笑脸/开心类」同名键，重复键会互相覆盖、悄悄丢数据喵~
     "😻": ["猫咪爱心眼贴纸！小南也喵喵叫~", "好可爱的猫咪贴纸！小南也想养猫了！"],
     "🐱": ["猫咪贴纸！小南的同族！喵呜~", "猫猫贴纸！小南也来蹭蹭！"],
     "🐶": ["狗狗贴纸！好可爱呀~ 汪汪！", "狗狗贴纸！小南也想摸摸头！"],
@@ -396,12 +396,12 @@ class StickerModule(BaseModule):
         except Exception as e:
             logger.error(f"解析贴纸集失败: {e}")
             await status_msg.edit_text(
-                f"❌ 解析贴纸集失败…\n\n"
-                f"可能的原因：\n"
-                f"• 贴纸集不存在或已删除\n"
-                f"• 贴纸集名称不正确\n"
-                f"• 网络连接问题\n\n"
-                f"请检查链接是否正确，或稍后重试~"
+                "❌ 解析贴纸集失败…\n\n"
+                "可能的原因：\n"
+                "• 贴纸集不存在或已删除\n"
+                "• 贴纸集名称不正确\n"
+                "• 网络连接问题\n\n"
+                "请检查链接是否正确，或稍后重试~"
             )
     
     async def handle_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -539,14 +539,16 @@ class StickerModule(BaseModule):
         stickers = stickers_data["stickers"]
         
         if not stickers:
-            await update.message.reply_text(
+            # 按钮回调进来的 update 没有 .message，必须用 effective_message 喵~
+            await update.effective_message.reply_text(
                 "📭 还没有收藏任何贴纸呢~\n"
                 "回复贴纸消息发送 /add_sticker 来收藏吧！"
             )
             return
         
         # 分页显示（每页5个）
-        page = int(context.args[0]) - 1 if context.args and context.args[0].isdigit() else 0
+        # 用 isdecimal 而不是 isdigit：'²'.isdigit() 为 True 但 int('²') 会 ValueError 喵~
+        page = int(context.args[0]) - 1 if context.args and context.args[0].isdecimal() else 0
         per_page = 5
         total_pages = (len(stickers) + per_page - 1) // per_page
         page = max(0, min(page, total_pages - 1))
@@ -555,7 +557,7 @@ class StickerModule(BaseModule):
         end = min(start + per_page, len(stickers))
         page_items = stickers[start:end]
         
-        msg = f"🎨 小南的贴纸收藏~\n"
+        msg = "🎨 小南的贴纸收藏~\n"
         msg += f"📊 共 {len(stickers)} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
         
         for i, s in enumerate(page_items, start + 1):
@@ -582,7 +584,7 @@ class StickerModule(BaseModule):
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
-        await update.message.reply_text(msg, reply_markup=reply_markup)
+        await update.effective_message.reply_text(msg, reply_markup=reply_markup)
     
     async def del_sticker_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/del_sticker <编号> - 删除收藏的贴纸（主人专属）"""

@@ -4,7 +4,6 @@
 import logging
 import random
 import string
-from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
@@ -297,7 +296,7 @@ class Admin(BaseModule):
         export_data = self.dm.export_errors()
         await update.message.reply_document(
             document=export_data.encode(),
-            filename=f"error_log.txt",
+            filename="error_log.txt",
             caption="📋 这是小南的错误日志哦~"
         )
     
@@ -425,6 +424,13 @@ class Admin(BaseModule):
     async def confirm_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理确认回调~"""
         query = update.callback_query
+
+        # 确认按钮可能出现在群里、或被转发出去，点的人不一定是主人；
+        # reset_data 会清空所有白名单/管理员数据，所以这里必须重新校验。
+        if not self.dm.is_owner(update.effective_user.id):
+            await query.answer("呜… 只有主人才能确认这个操作哦！(｡•́︿•̀｡)", show_alert=True)
+            return
+
         await query.answer()
         
         action = query.data.replace("confirm_", "")

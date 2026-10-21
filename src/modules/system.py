@@ -8,7 +8,6 @@ import psutil
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from config import BOT_NAME, BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
 
@@ -140,7 +139,7 @@ class System(BaseModule):
                 )
             else:
                 await update.message.reply_text(
-                    f"😅 没有这种性格呢~ 可选性格有：\n\n" +
+                    "😅 没有这种性格呢~ 可选性格有：\n\n" +
                     "\n".join([f"  • {k}" for k in personalities.keys()]) +
                     "\n\n用法：/role <性格名称>"
                 )
@@ -153,7 +152,7 @@ class System(BaseModule):
                 f"当前性格：{current_desc}\n\n"
                 f"可选性格：\n" +
                 "\n".join([f"  • {k}" for k in personalities.keys()]) +
-                f"\n\n用法：/role <性格名称>"
+                "\n\n用法：/role <性格名称>"
             )
     
     async def clear_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

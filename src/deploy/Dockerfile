@@ -15,9 +15,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Shanghai
 
 # 安装系统依赖
+# ffmpeg 是链接解析的硬需求：B站等站点只提供分离的音视频流，
+# 必须由 ffmpeg 合并，否则视频下载不下来（见 requirements.txt 的说明）
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     tzdata \
+    ffmpeg \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone \
     && apt-get clean \
@@ -30,8 +33,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制项目文件
+# 注意：**不要** COPY config.py。
+# 它被 .gitignore 忽略，全新克隆的仓库里不存在这个文件，
+# docker build 会直接死在这一行：COPY failed: file not found in build context。
+# 真正的 config.py 由 docker-compose 的 ../config.py 挂载进来（见 docker-compose.yml）。
 COPY main.py .
-COPY config.py .
+COPY config.example.py .
 COPY modules/ modules/
 COPY deploy/commands.txt deploy/
 

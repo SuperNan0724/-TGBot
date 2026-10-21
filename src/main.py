@@ -38,11 +38,46 @@ def _setup_console_encoding():
 
 _setup_console_encoding()
 
+
+def _apply_config_defaults() -> list:
+    """
+    老版本 config.py 缺少新增配置项时，用 config.example.py 的默认值补齐~
+
+    各功能模块都是 `from config import X` 的写法，键不存在会直接 ImportError，
+    于是「升级后某些模块整块加载失败」，而报错指在模块里、看不出是配置缺项。
+    用户已经写进 config.py 的值一律不覆盖。
+    """
+    try:
+        import importlib.util
+        import config
+
+        example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.example.py")
+        spec = importlib.util.spec_from_file_location("_config_example", example_path)
+        if spec is None or spec.loader is None:
+            return []
+        example = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(example)
+
+        added = []
+        for name in dir(example):
+            if not name.isupper() or hasattr(config, name):
+                continue
+            setattr(config, name, getattr(example, name))
+            added.append(name)
+        return added
+    except Exception:
+        # 兼容层只是兜底，绝不能因为它自己出错就挡住启动
+        return []
+
+
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ⚠️ 必须在下面任何 `from config import ...` 之前补齐，否则缺键直接 ImportError
+_CONFIG_DEFAULTS_ADDED = _apply_config_defaults()
 
 from config import TELEGRAM_BOT_TOKEN, BOT_NAME
 from modules.module_loader import ModuleLoader
@@ -54,6 +89,14 @@ from modules.anime_logger import setup_anime_logging, print_banner, print_module
 # 设置二次元风格日志
 setup_anime_logging()
 logger = logging.getLogger(__name__)
+
+if _CONFIG_DEFAULTS_ADDED:
+    logger.warning(
+        f"⚠️ config.py 缺少 {len(_CONFIG_DEFAULTS_ADDED)} 个配置项，"
+        f"已用 config.example.py 的默认值补齐：\n"
+        f"   └─ {', '.join(_CONFIG_DEFAULTS_ADDED)}\n"
+        f"      需要自定义的话，把这些项复制到 config.py 里就好~"
+    )
 
 
 # 代理探测逻辑已抽到 modules/net_helpers.py 共用（media_parser 也要用）
@@ -340,7 +383,26 @@ class BotApp:
             return 0
 
         me = os.getpid()
-        this_file = os.path.basename(os.path.abspath(__file__))  # main.py
+        this_path = os.path.abspath(__file__)
+        this_file = os.path.basename(this_path)  # main.py
+        this_dir = os.path.normcase(os.path.dirname(this_path))
+
+        def is_this_bot_arg(proc, arg: str) -> bool:
+            """
+            这个命令行参数是不是本项目这个 main.py 的路径~
+
+            只比文件名（main.py）会把机器上别的 Python 项目的 main.py 一起杀掉，
+            所以要求「文件名一致 + 所在目录就是本项目 src/」。
+            相对路径要按对方进程的 cwd 解析，拿不到 cwd 时宁可不杀。
+            """
+            if os.path.basename(arg) != this_file:
+                return False
+            if not os.path.isabs(arg):
+                try:
+                    arg = os.path.join(proc.cwd(), arg)
+                except Exception:
+                    return False
+            return os.path.normcase(os.path.dirname(os.path.abspath(arg))) == this_dir
 
         # 先收集所有「看起来是机器人」的进程
         candidates = []
@@ -349,8 +411,7 @@ class BotApp:
                 info = proc.info
                 if not (info["name"] or "").lower().startswith("python"):
                     continue
-                cmdline = info["cmdline"] or []
-                if not any(this_file in str(arg) for arg in cmdline):
+                if not any(is_this_bot_arg(proc, str(arg)) for arg in (info["cmdline"] or [])):
                     continue
                 candidates.append(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -428,9 +489,20 @@ class BotApp:
 
 def main():
     """主函数~ 一切从这里开始！"""
+    # 配置里的 data/ 路径都是相对 src/ 的，两个启动器也都是先 chdir 到 src/
+    # 再拉起本文件；直接 `python src/main.py` 时如果 cwd 是项目根目录，
+    # 数据就会写到另一个 data/ 目录（看起来像"数据全丢了"）
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     bot = BotApp()
-    bot.setup()
-    bot.run()
+    try:
+        bot.setup()
+        bot.run()
+    finally:
+        # setup() 中途失败时 run() 的 finally 根本不会执行，会留下 data/bot.pid；
+        # 而 start.bat --stop/--status 正是照着这个 PID 找进程，PID 被系统
+        # 复用之后就可能杀掉无关进程，所以任何退出路径都要清掉
+        bot._remove_pid_file()
 
 
 if __name__ == "__main__":

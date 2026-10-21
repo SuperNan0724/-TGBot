@@ -13,7 +13,7 @@ import random
 import asyncio
 from datetime import datetime
 
-from telegram import Update, ChatMemberUpdated
+from telegram import Update
 from telegram.ext import ChatMemberHandler, ContextTypes
 
 from .base_module import BaseModule

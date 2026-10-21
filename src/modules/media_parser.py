@@ -21,7 +21,6 @@ import re
 import shutil
 import tempfile
 import time
-from datetime import datetime
 
 import aiohttp
 from telegram import Update
@@ -439,6 +438,7 @@ class MediaParser(BaseModule):
         """用 ffmpeg 均匀抽帧，返回 JPEG 字节列表~"""
         max_frames = int(self._settings.get("max_frames", DEFAULT_MAX_FRAMES))
         tmpdir = tempfile.mkdtemp(prefix="nan_video_")
+        proc = None             # 超时要靠它把 ffmpeg 杀掉，见下面的 except
         try:
             video_path = os.path.join(tmpdir, "input.mp4")
             with open(video_path, "wb") as f:
@@ -482,6 +482,14 @@ class MediaParser(BaseModule):
             return frames
         except asyncio.TimeoutError:
             logger.error("ffmpeg 抽帧超时（视频可能过大）")
+            # wait_for 只是"不再等它"，进程本身还在跑：不杀掉会一直占着 CPU，
+            # 还在往临时目录里写帧，让下面的 rmtree 删不干净
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
             return []
         except Exception as e:
             logger.error(f"抽帧过程出错: {e}")
@@ -503,6 +511,7 @@ class MediaParser(BaseModule):
             ffprobe = shutil.which("ffprobe")
         if not ffprobe:
             return None
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 ffprobe, "-v", "error",
@@ -515,6 +524,13 @@ class MediaParser(BaseModule):
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
             return float(stdout.decode().strip())
         except Exception:
+            # 和抽帧一样：wait_for 超时只放弃等待，不会杀进程，别留下孤儿 ffprobe
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
             return None
 
     # ──────────────────────────────────────────

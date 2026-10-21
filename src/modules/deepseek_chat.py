@@ -6,7 +6,6 @@ import aiohttp
 import json
 import os
 import re
-import random
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,7 +14,7 @@ from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, f
 from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTORY_LENGTH, BOT_NAME_SHORT, DEFAULT_PERSONALITY
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt, get_personality_name
+from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt
 from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
 from .net_helpers import get_proxy_url, apply_thinking_options
 
@@ -122,15 +121,17 @@ def _extract_memories_from_text(text: str) -> list:
                 extracted.append(f"对方的名字是{name}")
     
     # 提取喜好信息
+    # 注意：谓语（喜欢/讨厌…）必须一起捕获，否则"我讨厌香菜"会被记成
+    # "对方香菜"，语义整个反掉（/memories 和系统提示里都是错的）。
     like_patterns = [
-        r"(?:我喜欢|我爱|我最爱|我超爱|我特别喜欢|我最喜欢)(.+?)(?:[，。！？\s]|$)",
-        r"(?:我讨厌|我不喜欢|我最讨厌)(.+?)(?:[，。！？\s]|$)",
-        r"(?:我的爱好是|我的兴趣是|我平时喜欢)(.+?)(?:[，。！？\s]|$)"
+        r"(我喜欢|我爱|我最爱|我超爱|我特别喜欢|我最喜欢)(.+?)(?:[，。！？\s]|$)",
+        r"(我讨厌|我不喜欢|我最讨厌)(.+?)(?:[，。！？\s]|$)",
+        r"(我的爱好是|我的兴趣是|我平时喜欢)(.+?)(?:[，。！？\s]|$)"
     ]
     for pattern in like_patterns:
         match = re.search(pattern, text)
         if match:
-            like = match.group(1).strip()
+            like = match.group(1)[1:] + match.group(2).strip()  # 去掉开头的"我"
             if len(like) <= 20:
                 extracted.append(f"对方{like}")
     
@@ -187,7 +188,6 @@ class DeepSeekChat(BaseModule):
         user_id = update.effective_user.id
         user_data = self.dm.get_user_data(user_id)
         current_role = user_data.get("personality", DEFAULT_PERSONALITY)
-        current_name = PERSONALITY_NAMES.get(current_role, "🐱 默认 - 可爱猫咪")
 
         # 保存当前页到 context
         context.user_data["role_page"] = 0
@@ -342,7 +342,7 @@ class DeepSeekChat(BaseModule):
             )
             return
         
-        msg = f"💭 小南记得关于你的事情~\n\n"
+        msg = "💭 小南记得关于你的事情~\n\n"
         for i, mem in enumerate(user_memories, 1):
             msg += f"{i}. 📝 {mem['content']}\n"
             msg += f"   🕐 {mem['time']}\n\n"

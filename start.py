@@ -4,6 +4,7 @@
 专为 Windows 平台设计~ 自动检测环境并启动机器人！
 """
 import os
+import re
 import sys
 import subprocess
 import shutil
@@ -85,9 +86,14 @@ def check_src_files() -> bool:
     root = get_project_root()
     src_dir = os.path.join(root, "src")
     
+    # 注意：这里**不能**要求 config.py 存在。
+    # 全新克隆的仓库里只有 config.example.py，config.py 是首次运行时
+    # 由配置向导（或 start.bat）生成的。以前把 config.py 列进必检清单，
+    # 结果第一次运行就报「缺少源文件 config.py」并 exit(1)，永远走不到
+    # 生成配置那一步——等于新手拿到项目后根本起不来。
     required_files = [
         "main.py",
-        "config.py",
+        "config.example.py",
         "requirements.txt",
         os.path.join("modules", "__init__.py"),
         os.path.join("modules", "base_module.py"),
@@ -155,86 +161,100 @@ def check_config() -> bool:
 
 
 def run_config_wizard():
-    """运行配置向导"""
+    """
+    运行配置向导~
+
+    以 config.example.py 为模板生成 config.py，只替换需要填的几项。
+    以前这里是整份硬编码写出去的，模板后来新增的配置项（视觉模型、链接解析、
+    ffmpeg 路径、代理……）全都不在里面，于是模块里 `from config import X`
+    直接 ImportError——用户看到的只是一个看不懂的报错，根本不知道是配置缺字段。
+    """
     root = get_project_root()
-    
-    print(f"\n{Colors.PINK}📝 配置向导启动~{Colors.RESET}")
-    print(f"{Colors.CYAN}接下来需要配置一些信息哦！{Colors.RESET}\n")
-    
-    # 检测 src 目录
     src_dir = os.path.join(root, "src")
     if os.path.exists(os.path.join(src_dir, "main.py")):
         config_path = os.path.join(src_dir, "config.py")
+        template_path = os.path.join(src_dir, "config.example.py")
     else:
         config_path = os.path.join(root, "config.py")
-    
+        template_path = os.path.join(root, "config.example.py")
+
+    print(f"\n{Colors.PINK}📝 配置向导启动~{Colors.RESET}")
+    print(f"{Colors.CYAN}接下来需要配置一些信息哦！{Colors.RESET}\n")
+
+    if not os.path.exists(template_path):
+        print(f"{Colors.RED}❌ 找不到配置模板：{template_path}{Colors.RESET}")
+        print(f"{Colors.YELLOW}   请确认仓库文件完整（config.example.py 是必需的）{Colors.RESET}")
+        return False
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        template = f.read()
+
     print(f"{Colors.BLUE}🤖 Telegram Bot Token{Colors.RESET}")
     print("在 Telegram 中搜索 @BotFather，发送 /newbot 创建机器人~")
     token = input("请输入你的 Telegram Bot Token: ").strip()
-    
+
     print(f"\n{Colors.BLUE}🔮 DeepSeek API Key（可选）{Colors.RESET}")
     api_key = input("请输入 DeepSeek API Key（直接回车跳过）: ").strip()
-    
+
     print(f"\n{Colors.BLUE}👤 主人信息{Colors.RESET}")
     owner_name = input('请输入你的名字（直接回车使用"主人"）: ').strip() or "主人"
-    owner_id = input("请输入你的 Telegram ID: ").strip()
-    
+    owner_id_raw = input("请输入你的 Telegram ID（纯数字，直接回车跳过）: ").strip()
+
     print(f"\n{Colors.BLUE}🤖 机器人名称{Colors.RESET}")
     bot_name = input('请输入机器人名称（直接回车使用"小南专属TGbot"）: ').strip() or "小南专属TGbot"
-    
-    # 生成配置
-    # 用 %r 写入字符串值：即使名字里带引号也不会破坏生成的 Python 语法
-    config_content = f'''"""
-配置文件~ 请在这里填写你的小秘密哦(｡♥‿♥｡)
-"""
-import os
 
-# Telegram Bot 配置
-TELEGRAM_BOT_TOKEN = {token or 'YOUR_TELEGRAM_BOT_TOKEN'!r}  # 从 @BotFather 那里拿到的小钥匙🔑
+    # 主人 ID 必须写成数字字面量。以前是直接把你输入的内容拼进去，
+    # 填成 @username 就会生成 `BOT_OWNER_ID = @username` —— 非法 Python，
+    # 整个 config.py 都导入不了，而报错信息完全看不出是这一行。
+    owner_id_text = "None"
+    if owner_id_raw:
+        if owner_id_raw.isdigit():
+            owner_id_text = owner_id_raw
+        else:
+            print(f"{Colors.YELLOW}⚠️  主人 ID 不是纯数字，已忽略这一项~{Colors.RESET}")
+            print(f"{Colors.YELLOW}   在 Telegram 里搜 @userinfobot 就能拿到数字 ID{Colors.RESET}")
 
-# DeepSeek API 配置
-DEEPSEEK_API_KEY = {api_key or 'YOUR_DEEPSEEK_API_KEY'!r}      # 从 DeepSeek 平台获取的魔法钥匙✨
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
+    replacements = [
+        (r"^TELEGRAM_BOT_TOKEN\s*=.*$", f"TELEGRAM_BOT_TOKEN = {token or 'YOUR_TELEGRAM_BOT_TOKEN'!r}"),
+        (r"^DEEPSEEK_API_KEY\s*=.*$", f"DEEPSEEK_API_KEY = {api_key or 'YOUR_DEEPSEEK_API_KEY'!r}"),
+        (r"^BOT_OWNER_ID\s*=.*$", f"BOT_OWNER_ID = {owner_id_text}"),
+        (r"^BOT_OWNER_NAME\s*=.*$", f"BOT_OWNER_NAME = {owner_name!r}"),
+        (r"^BOT_NAME\s*=.*$", f"BOT_NAME = {bot_name!r}"),
+    ]
 
-# 机器人配置
-BOT_NAME = {bot_name!r}  # 机器人的全称
-BOT_NAME_SHORT = "小南"      # 机器人的简称（在对话中显示的名字~）
-BOT_OWNER_NAME = {owner_name!r}  # 主人的名字（会显示在欢迎消息等地方哦~）
-BOT_OWNER_ID = {owner_id or 'None'}  # 主人的 Telegram ID（填上才能用主人专属命令哦~）
-DEFAULT_PERSONALITY = "default"  # 默认性格 ID（对应 personalities.py 中的 id）
-MAX_HISTORY_LENGTH = 10  # 每个小可爱最多保留的对话历史条数~
+    for pattern, replacement in replacements:
+        # 用 lambda 做替换而不是直接当替换串：替换串里的反斜杠会被当成转义
+        # （比如名字里带 \1），用函数就不会有这个问题
+        template, count = re.subn(pattern, lambda _m, r=replacement: r,
+                                  template, count=1, flags=re.M)
+        if count == 0:
+            print(f"{Colors.YELLOW}⚠️  模板里没有匹配到 {pattern}，这一项未写入{Colors.RESET}")
 
-# 数据文件路径
-DATA_DIR = "data"
-WHITELIST_FILE = "data/whitelist.json"
-ADMIN_FILE = "data/admins.json"
-USER_DATA_FILE = "data/user_data.json"
-ERROR_LOG_FILE = "data/errors.json"
-BACKUP_DIR = "data/backups"
+    # 落盘前先编译一遍：宁可报错退出，也不要留下一个 import 不进来的 config.py
+    try:
+        compile(template, config_path, "exec")
+    except SyntaxError as e:
+        print(f"{Colors.RED}❌ 生成的配置有语法错误，已放弃写入：{e}{Colors.RESET}")
+        return False
 
-# 付费白名单 / 发卡平台配置
-PAID_WHITELIST_FILE = "data/paid_whitelist.json"
-PRODUCTS_FILE = "data/products.json"
+    if os.path.exists(config_path):
+        backup_path = config_path + ".bak"
+        try:
+            shutil.copy2(config_path, backup_path)
+            print(f"{Colors.CYAN}💾 原有配置已备份到 {backup_path}{Colors.RESET}")
+        except OSError:
+            pass
 
-# 发卡平台回调服务器
-# ⚠️ CALLBACK_SECRET 是回调接口的唯一凭据，请改成随机字符串！
-CALLBACK_HOST = "127.0.0.1"
-CALLBACK_PORT = 8080
-CALLBACK_SECRET = "CHANGE_ME_TO_A_RANDOM_SECRET"
-DISABLE_CALLBACK_SERVER_IF_UNSET = True
-
-# 模块配置
-# 模块已改为自动扫描加载~
-# 把 .py 文件丢进 src/modules/ 目录就会自动加载啦！(๑•̀ㅂ•́)و✧
-'''
-    
     with open(config_path, "w", encoding="utf-8") as f:
-        f.write(config_content)
-    
+        f.write(template)
+
     print(f"\n{Colors.GREEN}✅ 配置文件已生成！{Colors.RESET}")
     print(f"   保存位置：{config_path}")
-    
+
+    if not token:
+        print(f"{Colors.YELLOW}⚠️  还没填 Token，机器人启动会失败哦~{Colors.RESET}")
+    print(f"{Colors.CYAN}💡 国内网络记得在 config.py 里填 PROXY_URL（例如 http://127.0.0.1:7897）{Colors.RESET}")
+
     return True
 
 
@@ -250,7 +270,18 @@ def install_dependencies():
         req_path = os.path.join(root, "requirements.txt")
     
     print(f"\n{Colors.BLUE}📦 正在安装依赖包...{Colors.RESET}")
-    
+
+    # 先探一下依赖在不在：已经装好就直接跳过。
+    # 以前每次都无条件跑 pip install，离线或 PyPI 抽风时会报一堆红字，
+    # 而实际依赖明明是齐的，看着像启动失败了。
+    probe = subprocess.run(
+        [sys.executable, "-c", "import telegram, aiohttp, psutil, yt_dlp"],
+        capture_output=True, text=True
+    )
+    if probe.returncode == 0:
+        print(f"{Colors.GREEN}✅ 依赖已安装，跳过~{Colors.RESET}")
+        return True
+
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", req_path],
@@ -401,8 +432,14 @@ def main():
         print()
         choice = input(f"{Colors.YELLOW}是否运行配置向导？(y/n，默认y): {Colors.RESET}").strip().lower()
         if choice != "n":
-            run_config_wizard()
-            config_ok = True
+            config_ok = run_config_wizard()
+
+    # 没有可用的配置就不要再往下走了：以前这里把 config_ok 直接置 True，
+    # 然后照常启动，用户看到的是一堆 ImportError，完全猜不到是没配 Token。
+    if not config_ok:
+        print(f"\n{Colors.RED}❌ 没有可用的 config.py，机器人没法启动~{Colors.RESET}")
+        print(f"{Colors.YELLOW}   请填好 src/config.py（或重新运行本启动器）后再试{Colors.RESET}")
+        sys.exit(1)
     
     # 选择部署方式
     print(f"\n{Colors.PINK}📋 选择部署方式：{Colors.RESET}")
@@ -421,8 +458,11 @@ def main():
         print(f"\n{Colors.YELLOW}👋 下次再见~ 喵！{Colors.RESET}")
         sys.exit(0)
     else:
-        # 安装依赖
-        install_dependencies()
+        # 安装依赖（装不上就别硬启动，否则用户只会看到满屏 ImportError）
+        if not install_dependencies():
+            print(f"\n{Colors.RED}❌ 依赖没装齐，机器人跑不起来~{Colors.RESET}")
+            print(f"{Colors.YELLOW}   按上面的提示装好依赖后再运行本启动器{Colors.RESET}")
+            sys.exit(1)
         
         # 创建数据目录
         root = get_project_root()

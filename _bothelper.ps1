@@ -27,14 +27,31 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
+function Test-IsOurBot {
+    # 判断某个进程的命令行是不是"本项目的 main.py"。
+    #
+    # 只匹配 "*main.py*" 是不够的：机器上任何一个拿 main.py 当入口的
+    # Python 项目都会被命中，然后在 stop 时被一起杀掉——用户完全不知道
+    # 自己另一个项目为什么突然没了。所以这里按 main.py 的完整路径匹配。
+    param($CommandLine, [string]$ScriptPath)
+
+    if (-not $CommandLine) { return $false }
+    if ($ScriptPath) {
+        return $CommandLine.IndexOf($ScriptPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    }
+    return $CommandLine.IndexOf('main.py', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
 function Get-BotProcesses {
     # 只返回"最顶层"的机器人实例。
     # 现实里可能出现同一命令行的多个进程（比如父进程被杀后留下的孤儿，
     # 或是手工起了两次），它们其实是同一个机器人的副本，
     # 这里按创建时间排序后只保留最早的那个，避免重复报告和重复停止。
+    param([string]$ScriptPath)
+
     $all = @(
         Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -like "*main.py*" } |
+            Where-Object { Test-IsOurBot -CommandLine $_.CommandLine -ScriptPath $ScriptPath } |
             Sort-Object CreationDate
     )
     if ($all.Count -le 1) { return $all }
@@ -52,7 +69,7 @@ function Get-BotProcesses {
 
 function Wait-ForBot {
     # 等机器人真的起来（写出 PID 文件且进程存在）
-    param([string]$PidFile, [int]$TimeoutSeconds = 45)
+    param([string]$PidFile, [int]$TimeoutSeconds = 45, [string]$ScriptPath)
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
@@ -70,9 +87,9 @@ function Wait-ForBot {
         }
 
         # 进程全死光了就再确认一次，然后判定失败
-        if (-not (Get-BotProcesses)) {
+        if (-not (Get-BotProcesses -ScriptPath $ScriptPath)) {
             Start-Sleep -Seconds 2
-            if (-not (Get-BotProcesses)) {
+            if (-not (Get-BotProcesses -ScriptPath $ScriptPath)) {
                 return @{ Ok = $false; Pid = 0 }
             }
         }
@@ -130,7 +147,7 @@ switch ($Action) {
             -WindowStyle Hidden `
             -PassThru
 
-        $result = Wait-ForBot -PidFile $pidfile -TimeoutSeconds 45
+        $result = Wait-ForBot -PidFile $pidfile -TimeoutSeconds 45 -ScriptPath $main
 
         if ($result.Ok) {
             Write-Output ""
@@ -145,7 +162,7 @@ switch ($Action) {
         Write-Output ""
         Write-Output "  [警告] 启动失败或超时"
         Write-Output ""
-        $alive = @(Get-BotProcesses)
+        $alive = @(Get-BotProcesses -ScriptPath $main)
         if ($alive.Count -gt 0) {
             Write-Output "  进程是否还活着: 是（PID $($alive.ProcessId -join ', ')）"
         } else {
@@ -190,9 +207,10 @@ switch ($Action) {
             Write-Output "  未运行（没有 PID 文件）"
         }
 
-        # 兜底：PID 文件丢了但进程还在
+        # 兜底：PID 文件丢了但进程还在（同样只认本项目的 main.py）
+        $mainPath = Join-Path $srcDir 'main.py'
         if (-not $running) {
-            foreach ($p in @(Get-BotProcesses)) {
+            foreach ($p in @(Get-BotProcesses -ScriptPath $mainPath)) {
                 Write-Output "  但检测到进程 PID $($p.ProcessId) 仍带着 main.py 在跑"
                 $running = $true
             }
@@ -221,9 +239,12 @@ switch ($Action) {
             }
         }
 
-        # 兜底：只结束命令行里带 main.py 的 python 进程。
-        # 绝不使用 taskkill /IM python.exe —— 那会杀掉机器上所有 Python 程序
-        foreach ($p in @(Get-BotProcesses)) {
+        # 兜底：只结束命令行里带**本项目** main.py 的 python 进程。
+        # 绝不使用 taskkill /IM python.exe —— 那会杀掉机器上所有 Python 程序；
+        # 也不能只认 "*main.py*" —— 那会杀掉别人家同样叫 main.py 的项目。
+        $srcDir = Split-Path (Split-Path $pidfile -Parent) -Parent
+        $mainPath = Join-Path $srcDir 'main.py'
+        foreach ($p in @(Get-BotProcesses -ScriptPath $mainPath)) {
             Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
             Write-Output "  已停止残留进程 PID $($p.ProcessId)"
             $stopped = 1

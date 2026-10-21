@@ -15,6 +15,40 @@ VOICE_CHANCE_MEDIUM = 0.20   # 中消息（<=150字）20%概率
 VOICE_CHANCE_LONG = 0.10     # 长消息（<=300字）10%概率
 VOICE_MAX_LENGTH = 300       # 超过300字不发语音
 
+# Telegram 单条消息的硬上限是 4096 个字符，超过会直接抛
+# BadRequest: Message is too long，整条回复都发不出去
+TELEGRAM_MAX_LEN = 4096
+
+
+def split_text(text: str, limit: int = TELEGRAM_MAX_LEN) -> list:
+    """
+    把超长文本切成 Telegram 能接受的多段~
+
+    优先在换行 / 句末标点处断开，避免把一句话从中间劈开。
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    while len(text) > limit:
+        window = text[:limit]
+        cut = window.rfind('\n')
+        if cut <= 0:
+            cut = max(window.rfind(ch) for ch in ('。', '！', '？', '，', '.', ' '))
+            if cut > 0:
+                cut += 1  # 把句末标点留在本段末尾，不要甩到下一条消息开头
+        if cut <= 0:
+            cut = limit
+        piece = text[:cut].strip()
+        if piece:
+            chunks.append(piece)
+        text = text[cut:].lstrip('\n')
+    if text.strip():
+        chunks.append(text.strip())
+    return chunks
+
 
 def unescape_text(text: str) -> str:
     """
@@ -205,13 +239,14 @@ async def try_send_voice(bot, chat_id: int, text: str, tts_module=None):
     """
     尝试发送语音消息
     """
-    # 全局开关
+    # 全局开关：老版本 config.py 里没有这一项，缺省时按 README 的约定
+    # 「自动语音默认关闭」处理，而不是反过来把语音打开
     try:
         from config import DISABLE_AUTO_VOICE
-        if DISABLE_AUTO_VOICE:
-            return
     except (ImportError, AttributeError):
-        pass
+        DISABLE_AUTO_VOICE = True
+    if DISABLE_AUTO_VOICE:
+        return
     
     if not tts_module:
         return
@@ -276,7 +311,9 @@ async def send_humanized(
             think_delay = 0.6 if emotion == "negative" else 0.3
             await asyncio.sleep(think_delay)
 
-        await reply_func(para)
+        # 单段落也可能超过 4096 字（AI 一次写很长），必须切开再发
+        for chunk in split_text(para):
+            await reply_func(chunk)
 
         if i < len(paragraphs) - 1:
             para_len = len(para)

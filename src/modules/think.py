@@ -1,6 +1,6 @@
 """
 思考模式模块~ 让小南帮你认真思考问题！(｡•̀ᴗ-)✧
-支持 /think 命令和关键词触发（帮我想一下、思考一下、帮我找一下）
+支持 /think 命令和关键词触发（帮我想一下、思考一下、帮我分析）
 
 ✨ 特性：
 - 思考时不会被中断（同一用户加锁）
@@ -15,35 +15,33 @@ import re
 from datetime import datetime
 
 from telegram import Update
-from telegram.ext import CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
+from .net_helpers import get_proxy_url
 
 logger = logging.getLogger(__name__)
 
-# 触发关键词
-TRIGGER_KEYWORDS = [
+# 自动触发关键词
+#
+# 只放"明确在要求小南思考"的说法。
+# 千万不要把「有没有 / 是什么 / 为什么 / 如何 / 你觉得」这类词加进来：
+# 它们几乎每句日常聊天都会命中，关键词触发会把性格对话整个劫持成
+# 「🤔 认真模式」，用户想正常聊天都没法聊。
+TRIGGER_KEYWORDS = (
     "帮我想一下",
     "思考一下",
-    "帮我找一下",
-    "帮我查一下",
     "帮我分析",
-    "帮我看看",
-    "我想知道",
-    "你说说",
-    "你怎么看",
-    "你觉得",
-    "有没有",
-    "是什么",
-    "为什么",
-    "怎么办",
-    "怎么弄",
-    "如何",
-    "啥是",
-    "啥叫",
-]
+    "帮我琢磨",
+)
 
 # 思考模式系统提示词（引导 AI 内部思考，只输出结论）
 THINK_SYSTEM_PROMPT_TEMPLATE = """你是一只聪明又认真的思考型猫咪，名叫{name}。
@@ -78,17 +76,26 @@ class Think(BaseModule):
         self._thinking_users: dict = {}
     
     def register_handlers(self, application):
-        """注册命令和消息处理器~"""
+        """注册命令和消息处理器~
+
+        关键词触发的 handler 必须放进 group=-2。
+        python-telegram-bot 每个 group 只执行**第一个**命中的 handler，
+        而 deepseek_chat 的全量文本 handler 在 group=0，模块又是按文件名
+        字母序加载的（deepseek_chat 排在 think 前面）——所以以前放在
+        group=0 的触发 handler 永远轮不到，文档里承诺的「也可以直接说
+        帮我想一下」其实一次都没生效过。
+        命中后抛 ApplicationHandlerStop，免得同一条消息又被性格对话回一遍。
+        """
         application.add_handler(CommandHandler("think", self.think_command))
         # 关键词触发只处理私聊，群聊需要 @ 或回复
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
             self.handle_private_message
-        ))
+        ), group=-2)
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
             self.handle_group_message
-        ))
+        ), group=-2)
     
     def _is_thinking(self, user_id: int) -> bool:
         """检查用户是否正在思考中~"""
@@ -128,9 +135,12 @@ class Think(BaseModule):
     async def handle_private_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理私聊消息，检测关键词触发思考模式~"""
         text = update.effective_message.text
-        
-        if self._should_think(text):
-            await self._handle_think(update, context, text)
+
+        if not self._should_think(text):
+            return
+        await self._handle_think(update, context, text)
+        # 已经用思考模式回过了，别再让性格对话回一遍
+        raise ApplicationHandlerStop
     
     async def handle_group_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理群聊消息，检测关键词触发思考模式~"""
@@ -161,6 +171,8 @@ class Think(BaseModule):
         
         if self._should_think(text):
             await self._handle_think(update, context, text)
+            # 已经用思考模式回过了，别再让性格对话回一遍
+            raise ApplicationHandlerStop
     
     def _should_think(self, text: str) -> bool:
         """判断是否应该进入思考模式~"""
@@ -257,8 +269,16 @@ class Think(BaseModule):
             "max_tokens": 1000   # 限制输出长度，只保留结论
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=25) as resp:
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            async with session.post(
+                DEEPSEEK_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=25,
+                # 和 deepseek_chat 保持一致：走 config 里的代理，
+                # 否则填了 PROXY_URL 的用户这里会连不上
+                proxy=get_proxy_url() or None,
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]

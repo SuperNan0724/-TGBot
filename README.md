@@ -250,11 +250,11 @@ python start.py
 
 所有配置都在 **`src/config.py`** 文件中，用记事本或任意代码编辑器打开就能修改啦~
 
-> ⚠️ **注意：** 项目中有两个 `config.py` 文件：
-> - **`src/config.py`** ← 你实际要修改的配置文件（含你的敏感信息）
-> - `source/src/config.py` ← 上传 GitHub 用的模板（不含敏感信息，不要改这个！）
+> ⚠️ **注意：** 仓库里只有配置**模板** `src/config.example.py`，没有 `config.py`：
+> - **`src/config.py`** ← 你的真实配置（首次运行 `start.bat` / `start.py` 时从模板复制生成，已被 `.gitignore` 忽略）
+> - `src/config.example.py` ← 模板，**不要**把自己的 Token 填在这里（它会被提交到仓库！）
 >
-> 使用 `sync.py` 同步时，`source/src/config.py` 会自动保留你的敏感字段，不会丢失哦~
+> 升级到新版本后，如果 `config.py` 里缺少新加的配置项，机器人启动时会自动用模板里的默认值补齐（不影响你已填的值），不会因为缺字段直接报错。
 
 ---
 
@@ -491,18 +491,19 @@ python start.py
 ```
 🌸 小南专属TGbot/ 🌸
 ├── README.md               ← 📖 就是你现在看的这个！
-├── start.py                🚀 Windows 启动器
-├── sync.py                 🔄 一键同步工具
+├── start.py                🚀 Windows 启动器（Python 版）
+├── start.bat               🚀 一键启动脚本（推荐用这个，自带 .venv）
+├── _bothelper.ps1          🔧 start.bat 的助手（前后台启停，别单独运行）
+├── setup_douyin_cookie.py  🍪 抖音 Cookie 配置工具（抖音目前不支持解析，见下文）
+├── 配置抖音Cookie.bat      🍪 上面那个工具的快捷入口
 ├── .gitignore              🙈 Git 忽略文件
-├── .dockerignore           🐳 Docker 忽略文件
 │
 ├── src/                    💻 你的调试目录（含配置信息）
 │   ├── main.py             🎯 主程序入口
-│   ├── config.py           🔑 你的配置（Token/Key/ID）
+│   ├── config.py           🔑 你的配置（首次运行由 config.example.py 复制产生）
 │   ├── requirements.txt    📦 Python 依赖
 │   │
 │   ├── modules/            🧩 所有功能都在这里！
-│   │   ├── start.py            # ⚠️ 陈旧副本，待删除（不是模块！）
 │   │   ├── __init__.py
 │   │   ├── base_module.py      # 🧬 模块基类
 │   │   ├── module_loader.py    # 📥 自动加载器
@@ -539,11 +540,6 @@ python start.py
 │       ├── setup.bat
 │       ├── setup.sh
 │       └── 指令集.txt
-│
-└── source/                📦 源码目录（上传 GitHub 用的）
-    ├── start.py
-    ├── README.md
-    └── src/（不含你的配置信息）
 ```
 
 ---

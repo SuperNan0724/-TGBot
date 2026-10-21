@@ -138,7 +138,7 @@ rem  3. ∞≤◊∞“¿¿µ
 rem ============================================================
 echo   [3/5] ºÏ≤È“¿¿µ...
 
-"%PY%" -c "import telegram, aiohttp, psutil" >nul 2>&1
+"%PY%" -c "import telegram, aiohttp, psutil, yt_dlp" >nul 2>&1
 if not errorlevel 1 (
     echo   [3/5] “¿¿µ  OK
     goto :ffmpeg_check

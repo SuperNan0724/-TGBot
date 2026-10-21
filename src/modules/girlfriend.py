@@ -17,16 +17,14 @@ import json
 import os
 import asyncio
 import re
-import functools
-import random
-from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+from config import BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .helpers import humanize_reply, send_humanized, try_send_voice, get_time_context, get_common_knowledge
+from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -209,11 +207,11 @@ class GirlfriendModule(BaseModule):
             )
         else:
             msg = (
-                f"💕 小南的女友模式~\n\n"
-                f"选择你喜欢的女友性格，小南就会变成你的专属女友哦！\n\n"
-                f"🌸 完美萝莉女友 - 天真可爱，粘人撒娇\n"
-                f"🌙 白月光女友 - 温柔优雅，知性体贴\n\n"
-                f"选择后直接和我聊天就能体验啦~ (｡♥‿♥｡)"
+                "💕 小南的女友模式~\n\n"
+                "选择你喜欢的女友性格，小南就会变成你的专属女友哦！\n\n"
+                "🌸 完美萝莉女友 - 天真可爱，粘人撒娇\n"
+                "🌙 白月光女友 - 温柔优雅，知性体贴\n\n"
+                "选择后直接和我聊天就能体验啦~ (｡♥‿♥｡)"
             )
         
         await update.message.reply_text(msg, reply_markup=reply_markup)
@@ -247,20 +245,20 @@ class GirlfriendModule(BaseModule):
             
             if gf_id == "loli_gf":
                 reply = (
-                    f"🌸 完美萝莉女友已上线！\n\n"
-                    f"哥哥~ 人家等你好久了！(｡♥‿♥｡)\n"
-                    f"从现在开始我就是哥哥的专属小女友啦！\n\n"
-                    f"哥哥想聊什么呀？🥰"
+                    "🌸 完美萝莉女友已上线！\n\n"
+                    "哥哥~ 人家等你好久了！(｡♥‿♥｡)\n"
+                    "从现在开始我就是哥哥的专属小女友啦！\n\n"
+                    "哥哥想聊什么呀？🥰"
                 )
             elif gf_id == "moonlight_gf":
                 reply = (
-                    f"🌙 白月光女友已上线！\n\n"
-                    f"你来了。我等了你很久呢。\n"
-                    f"从今以后，我就是你的白月光了。\n\n"
-                    f"今天过得怎么样？想跟我说说话吗？"
+                    "🌙 白月光女友已上线！\n\n"
+                    "你来了。我等了你很久呢。\n"
+                    "从今以后，我就是你的白月光了。\n\n"
+                    "今天过得怎么样？想跟我说说话吗？"
                 )
             else:
-                reply = f"已上线~ 来聊天吧！(｡♥‿♥｡)"
+                reply = "已上线~ 来聊天吧！(｡♥‿♥｡)"
             
             await query.edit_message_text(reply)
     
@@ -374,9 +372,10 @@ class GirlfriendModule(BaseModule):
             return
         
         user_message = update.message.text
-        user_name = update.effective_user.first_name or "宝贝"
         
-        gf_prompt = get_gf_prompt(current_gf, user_name)
+        # 人设里的 {name} 是「她自己」的名字（"你是{name}，19岁…"），
+        # 必须用机器人名；之前传的是对方 first_name，她会自称成对方的名字。
+        gf_prompt = get_gf_prompt(current_gf, BOT_NAME_SHORT)
         if not gf_prompt:
             return
         

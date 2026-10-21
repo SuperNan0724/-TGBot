@@ -22,6 +22,9 @@ EXCLUDED_MODULES = {
     "helpers",
     "net_helpers",
     "third_party_parser",
+    # modules/start.py 曾是一份根目录启动器的陈旧副本，不是功能模块：
+    # 它没有模块类、导入即抛 ImportError，所以名字留在这里防止再被当成模块
+    "start",
 }
 
 # 不可缺失模块（加载失败会阻止机器人启动）
