@@ -77,6 +77,10 @@ class Help(BaseModule):
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/help - 查看帮助喵～"""
+        # 频道里发命令时 effective_user 是 None（channel_post 没有发送者用户），
+        # 直接取 .id 会 AttributeError，先挡掉
+        if update.effective_user is None:
+            return
         user_id = update.effective_user.id
         
         from .data_manager import DataManager

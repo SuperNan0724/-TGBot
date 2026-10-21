@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import socket
+import time
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,25 @@ logger = logging.getLogger(__name__)
 # 占位值：配置里留空时用它表示"没有显式配置代理"
 _PLACEHOLDERS = {"", "YOUR_PROXY_URL", "NONE", "null"}
 
-# 探测结果缓存，避免每条消息都去读一次注册表
+# 探测结果缓存，避免每条消息都去读一次注册表。
+# ⚠️ 但**不能永久缓存**：代理通常在机器人启动之后才开，
+#    永久缓存会让新开的代理永远不生效（症状是"我明明开了代理，机器人还是连不上"）。
+#    所以给缓存加个 TTL，过期后重新探测一次。
+_CACHE_TTL_SECONDS = 90
+
 _cached_proxy = None
 _cache_done = False
+_cache_time = 0.0
+
+
+def _now() -> float:
+    """
+    取当前单调时钟（秒）~
+
+    单独抽成一个函数是为了让测试能替换时钟，验证 TTL 过期逻辑，
+    不影响真实的 time.monotonic()。
+    """
+    return time.monotonic()
 
 
 def detect_system_proxy() -> str:
@@ -125,15 +142,21 @@ def get_proxy_url(use_cache: bool = True) -> str:
       1. config.py 里显式配置的 PROXY_URL
       2. 系统代理（当 PROXY_AUTO_DETECT 为 True 时）
 
+    缓存行为：
+        探测结果会缓存 **90 秒**（_CACHE_TTL_SECONDS），过期后自动重新探测。
+        这样"先启动机器人、后开代理"也能在 90 秒内生效，不用重启机器人。
+        想让它立刻重新探测（比如刚改了配置），传 use_cache=False
+        或调用 reset_cache()。
+
     Args:
         use_cache: 是否使用缓存结果（默认 True）。配置热更新后想重新探测就传 False
 
     Returns:
         str: 代理地址，没有则返回空字符串
     """
-    global _cached_proxy, _cache_done
+    global _cached_proxy, _cache_done, _cache_time
 
-    if use_cache and _cache_done:
+    if use_cache and _cache_done and (_now() - _cache_time) < _CACHE_TTL_SECONDS:
         return _cached_proxy
 
     proxy = ""
@@ -152,14 +175,16 @@ def get_proxy_url(use_cache: bool = True) -> str:
 
     _cached_proxy = proxy
     _cache_done = True
+    _cache_time = _now()
     return proxy
 
 
 def reset_cache():
     """清掉代理探测缓存~（配置改了以后可以调用）"""
-    global _cached_proxy, _cache_done
+    global _cached_proxy, _cache_done, _cache_time
     _cached_proxy = None
     _cache_done = False
+    _cache_time = 0.0
 
 
 def _expand_env_path(raw_path: str) -> str:

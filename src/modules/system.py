@@ -1,6 +1,7 @@
 """
 系统模块~ 小南的身体状态和系统管理！(｡･ω･｡)ﾉ♡
 """
+import asyncio
 import logging
 import time
 import psutil
@@ -30,12 +31,22 @@ class System(BaseModule):
         application.add_handler(CommandHandler("start", self.start_cmd))
         application.add_handler(CommandHandler("status", self.status))
         application.add_handler(CommandHandler("system_status", self.system_status))
-        application.add_handler(CommandHandler("role", self.role))
+        # /role 由 deepseek_chat 提供（翻页性格菜单），这里再注册会被前面的模块抢走、永远不执行
         application.add_handler(CommandHandler("clear", self.clear_memory))
         application.add_handler(CommandHandler("reset", self.reset))
     
+    def _skip_channel(self, update: Update) -> bool:
+        """频道里的 Update 没有 effective_user，取 .id 就会 AttributeError，直接跳过~"""
+        if update.effective_user is None:
+            logger.warning("在频道里收到了命令，但频道消息没有用户信息，已忽略~")
+            return True
+        return False
+    
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/start - 我是混日子的喵～"""
+        # 频道里发命令时 effective_user 是 None，直接取属性会 AttributeError
+        if self._skip_channel(update):
+            return
         user = update.effective_user
         user_name = user.first_name or "小可爱"
         
@@ -89,6 +100,8 @@ class System(BaseModule):
     
     async def system_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/system_status - 当前小南身体状态喵"""
+        if self._skip_channel(update):
+            return
         user_id = update.effective_user.id
         if not (self.dm.is_owner(user_id) or self.dm.is_admin(user_id)):
             await update.message.reply_text("呜… 你没有权限查看这个哦！需要管理员权限呢~ (｡•́︿•̀｡)")
@@ -97,7 +110,9 @@ class System(BaseModule):
         uptime_seconds = int(time.time() - self.start_time)
         uptime_str = self._format_uptime(uptime_seconds)
         
-        cpu_percent = psutil.cpu_percent(interval=0.3)
+        # 带 interval 的采样会 sleep 0.3 秒，直接在事件循环里调用会把整个机器人
+        # 卡住 0.3 秒（这期间所有用户的消息都排队），所以丢到线程里采样~
+        cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 0.3)
         memory = psutil.virtual_memory()
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
@@ -113,50 +128,10 @@ class System(BaseModule):
         
         await update.message.reply_text(system_text)
     
-    async def role(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/role - 切换性格喵～"""
-        user_id = update.effective_user.id
-        user_data = self.dm.get_user_data(user_id)
-        
-        personalities = {
-            "default": "😺 默认模式 - 普通可爱的小南",
-            "tsundere": "😤 傲娇模式 - 哼！才不是特意为你这样的呢！",
-            "loli": "🎀 萝莉模式 - 欧尼酱~ 一起玩吧！",
-            "senpai": "👓 前辈模式 - 让我来教你吧~",
-            "yandere": "💕 病娇模式 - 你是我的… 永远都是我的…",
-            "sleepy": "😴 慵懒模式 - 哈啊~ 好困… 不想动…",
-            "gamer": "🎮 游戏模式 - 来开黑吗？我超强的！",
-        }
-        
-        if context.args:
-            new_role = context.args[0].lower()
-            if new_role in personalities:
-                user_data["personality"] = new_role
-                self.dm.save_user_data(user_id, user_data)
-                await update.message.reply_text(
-                    f"🎭 性格已切换为：{personalities[new_role]}\n"
-                    f"从现在开始，我会用这种性格和你聊天哦~ 喵！"
-                )
-            else:
-                await update.message.reply_text(
-                    "😅 没有这种性格呢~ 可选性格有：\n\n" +
-                    "\n".join([f"  • {k}" for k in personalities.keys()]) +
-                    "\n\n用法：/role <性格名称>"
-                )
-        else:
-            current = user_data.get("personality", "default")
-            current_desc = personalities.get(current, "未知")
-            
-            await update.message.reply_text(
-                f"🎭 性格切换~\n\n"
-                f"当前性格：{current_desc}\n\n"
-                f"可选性格：\n" +
-                "\n".join([f"  • {k}" for k in personalities.keys()]) +
-                "\n\n用法：/role <性格名称>"
-            )
-    
     async def clear_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/clear - 清空我对你的印象喵～"""
+        if self._skip_channel(update):
+            return
         user_id = update.effective_user.id
         if self.dm.delete_user_history(user_id):
             await update.message.reply_text("🧹 已清空我对你的印象~ 我们重新认识一下吧！(｡♥‿♥｡)")
@@ -165,6 +140,8 @@ class System(BaseModule):
     
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/reset - 完全重置喵～"""
+        if self._skip_channel(update):
+            return
         user_id = update.effective_user.id
         if self.dm.delete_user_data(user_id):
             await update.message.reply_text(
@@ -177,6 +154,9 @@ class System(BaseModule):
     
     def _format_uptime(self, seconds: int) -> str:
         """格式化运行时间~"""
+        # 系统时钟被往回拨时，start_time 会"在未来"，差值是负数，
+        # 会显示成 "-1天23小时…"；这里统一夹到 0
+        seconds = max(0, int(seconds))
         days = seconds // 86400
         hours = (seconds % 86400) // 3600
         minutes = (seconds % 3600) // 60

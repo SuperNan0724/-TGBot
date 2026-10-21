@@ -20,11 +20,14 @@
 
 ---
 
-> ⚠️ **平台说明：本项目仅适用于 Windows 系统**
+> 🖥️ **平台说明：Windows / Linux / macOS / Docker 都能跑**
 >
-> 小南的启动器（`start.py`）使用了 Windows 专属命令（`taskkill`、`wmic`、`chcp` 等），
-> 暂不支持 Linux / macOS 系统。如果你需要在其他平台部署，请自行修改相关代码~
-> 推荐使用 Windows 10/11 系统运行哦！(｡♥‿♥｡)
+> - **Windows 本机**：双击 `start.bat`（最简单，自带 `.venv` 和后台管理）
+> - **Linux 服务器**：`src/deploy/setup.sh --service` 装成 systemd 服务
+> - **Docker / 云平台**：仓库根目录 `docker compose up -d --build`，配置走环境变量
+>
+> 程序本体（`src/`）是跨平台的；只有 `start.py` / `start.bat` / `_bothelper.ps1`
+> 这套 Windows 启动器用了 Windows 专属命令。详细步骤见 **[DEPLOY.md](DEPLOY.md)**~ (｡♥‿♥｡)
 
 ---
 
@@ -218,6 +221,27 @@ python start.py
 ```
 
 快去 Telegram 里找你的 Bot 聊天吧！发送 `/start` 试试~ 🎀
+
+---
+
+### 🐳 Linux / Docker / 云平台部署
+
+程序本体是跨平台的，三种方式任选（完整步骤见 **[DEPLOY.md](DEPLOY.md)**）：
+
+```bash
+# Linux 服务器：装依赖 + 装成 systemd 服务（开机自启）
+cd src/deploy && ./setup.sh --mirror --service
+
+# 有 Docker 的机器 / NAS：仓库根目录一条命令
+cp .env.example .env      # 填 TELEGRAM_BOT_TOKEN
+docker compose up -d --build
+
+# 云平台（Railway / Render / Fly.io）：连仓库 → 选 Dockerfile → 配环境变量 → 挂 /app/data 卷
+```
+
+> 💡 容器和 systemd 都**不需要** `config.py`：配置走同名环境变量，
+> 环境变量会覆盖 `config.example.py` 里的默认值（优先级最高）。
+> ⚠️ 同一个 Token 只能跑一个实例，本地和云上同时开会撞 `409 Conflict`。
 
 ---
 
@@ -535,11 +559,16 @@ python start.py
 │   │   └── backups/             # 备份
 │   │
 │   └── deploy/            🚢 部署文件
-│       ├── Dockerfile
-│       ├── docker-compose.yml
-│       ├── setup.bat
-│       ├── setup.sh
+│       ├── setup.sh            # Linux/macOS 安装（--service 装 systemd）
+│       ├── manage.sh           # Linux/macOS 启停管理
+│       ├── telegram-bot.service # systemd 单元模板
 │       └── 指令集.txt
+│
+├── Dockerfile              🐳 容器镜像（构建上下文=仓库根目录）
+├── docker-compose.yml      🐳 一键部署（配置读 .env）
+├── .dockerignore           🙈 构建排除（凭据/数据/虚拟环境）
+├── .env.example            🔑 环境变量模板（复制成 .env）
+└── DEPLOY.md               📖 四种部署方式详解
 ```
 
 ---

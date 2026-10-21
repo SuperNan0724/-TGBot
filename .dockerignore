@@ -1,0 +1,36 @@
+# 构建上下文排除项（Docker 只看仓库根目录这一份 .dockerignore）
+#
+# 目的：镜像里不许出现凭据、不装自己的数据和虚拟环境，构建也更快。
+
+# ── 凭据：绝对不进镜像 ──
+src/config.py
+src/config.py.bak
+.env
+.env.*
+!.env.example
+
+# ── 运行时数据（用户对话、白名单、付费记录）──
+src/data
+data
+logs
+*.log
+*.pid
+
+# ── 版本控制 / 编辑器 ──
+.git
+.gitignore
+.gitattributes
+.github
+.vscode
+.idea
+
+# ── 虚拟环境与缓存 ──
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+.pytest_cache
+
+# ── 文档（镜像里用不到）──
+**/*.md

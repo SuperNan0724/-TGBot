@@ -28,14 +28,28 @@ STICKER_FILE = "data/stickers.json"
 
 
 def _load_stickers() -> dict:
-    """加载贴纸收藏库~"""
+    """加载贴纸收藏库~
+
+    这里只保证"返回一个带 stickers 列表的 dict"：文件被手改坏、写到一半、
+    或者某些条目不是对象 / 没有 file_id（下载或导入中断时的残留），
+    都不该让每个命令在 data["stickers"] 上抛 KeyError / AttributeError 喵~
+    """
+    data = None
     if os.path.exists(STICKER_FILE):
         try:
             with open(STICKER_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except Exception as e:
             logger.error(f"加载贴纸数据失败: {e}")
-    return {"stickers": []}
+    if not isinstance(data, dict):
+        data = {}
+    stickers = data.get("stickers")
+    if not isinstance(stickers, list):
+        stickers = []
+    data["stickers"] = [
+        s for s in stickers if isinstance(s, dict) and s.get("file_id")
+    ]
+    return data
 
 
 def _save_stickers(data: dict):
@@ -476,15 +490,15 @@ class StickerModule(BaseModule):
                 sticker_link = link_match.group(1)
         
         if sticker_link:
-            # 通过链接添加贴纸集
+            # 私聊里 handle_sticker_link 本来就能整包导入，别再跟主人说「无法下载」啦喵~
+            if update.effective_chat.type == "private":
+                await self.handle_sticker_link(update, context)
+                return
             await update.message.reply_text(
                 f"📦 检测到贴纸集链接：{sticker_link}\n\n"
-                f"💡 小南暂时无法直接通过链接下载贴纸集哦~\n"
-                f"请按以下步骤操作：\n\n"
-                f"1️⃣ 点击链接打开贴纸集：https://t.me/addstickers/{sticker_link}\n"
-                f"2️⃣ 发送其中的任意一个贴纸给小南\n"
-                f"3️⃣ 回复那个贴纸消息，发送 /add_sticker\n\n"
-                f"这样小南就能收藏这个贴纸啦！(｡♥‿♥｡)"
+                f"💡 小南能直接导入整个贴纸集哦~ 但只能在私聊里做！\n"
+                f"请私聊小南，把链接单独发一条（和命令分开写）：\n"
+                f"https://t.me/addstickers/{sticker_link}"
             )
             return
         
@@ -617,6 +631,51 @@ class StickerModule(BaseModule):
         except ValueError:
             await update.message.reply_text("😅 要输入数字编号哦~")
     
+    async def _show_delete_page(self, query, page: int):
+        """显示某一页的删除菜单~（每页 10 个，按钮和文字都离 Telegram 上限远远的喵~）"""
+        stickers_data = _load_stickers()
+        stickers = stickers_data["stickers"]
+
+        if not stickers:
+            await query.edit_message_text("📭 还没有收藏任何贴纸呢~")
+            return
+
+        per_page = 10
+        total_pages = (len(stickers) + per_page - 1) // per_page
+        # 删过贴纸之后旧页码可能已经越界了，先夹回有效范围喵~
+        page = max(0, min(page, total_pages - 1))
+
+        start = page * per_page
+        end = min(start + per_page, len(stickers))
+        page_items = stickers[start:end]
+
+        msg = "🗑️ 选择要删除的贴纸~\n"
+        msg += f"📊 共 {len(stickers)} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
+        keyboard = []
+
+        for i, s in enumerate(page_items, start + 1):
+            emoji = s.get("emoji", "") or ""
+            anim = "🎬" if s.get("is_animated") else "🖼️"
+            msg += f"{i}. {anim} {emoji} {s.get('set_name', '未知')}\n"
+            keyboard.append([
+                InlineKeyboardButton(f"🗑️ 删除 #{i}", callback_data=f"sticker_del_{i-1}")
+            ])
+
+        # 翻页按钮（和 /sticker_list 一样排成一排）
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀ 上一页", callback_data=f"sticker_show_delete_{page-1}"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("下一页 ▶", callback_data=f"sticker_show_delete_{page+1}"))
+        if nav_row:
+            keyboard.append(nav_row)
+
+        keyboard.append([
+            InlineKeyboardButton("🔙 返回列表", callback_data="sticker_back_to_list")
+        ])
+
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+
     async def sticker_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理贴纸按钮回调~"""
         query = update.callback_query
@@ -626,41 +685,30 @@ class StickerModule(BaseModule):
         
         # 翻页
         if data.startswith("sticker_list_"):
-            page = int(data.replace("sticker_list_", ""))
+            # callback_data 是客户端发上来的，被改造过就是任意字符串，
+            # 直接 int() 会 ValueError 冲出 handler，所以先校验再转
+            suffix = data[len("sticker_list_"):]
+            if not suffix.isdecimal():
+                await query.answer("页码不对哦~", show_alert=False)
+                return
+            page = int(suffix)
             context.args = [str(page + 1)]
             await self.sticker_list_command(update, context)
         
-        # 显示删除选择
-        elif data == "sticker_show_delete":
-            stickers_data = _load_stickers()
-            stickers = stickers_data["stickers"]
-            
-            if not stickers:
-                await query.edit_message_text("📭 还没有收藏任何贴纸呢~")
-                return
-            
-            # 显示带删除按钮的列表
-            msg = "🗑️ 选择要删除的贴纸~\n\n"
-            keyboard = []
-            
-            for i, s in enumerate(stickers, 1):
-                emoji = s.get("emoji", "") or ""
-                anim = "🎬" if s.get("is_animated") else "🖼️"
-                msg += f"{i}. {anim} {emoji} {s.get('set_name', '未知')}\n"
-                keyboard.append([
-                    InlineKeyboardButton(f"🗑️ 删除 #{i}", callback_data=f"sticker_del_{i-1}")
-                ])
-            
-            keyboard.append([
-                InlineKeyboardButton("🔙 返回列表", callback_data="sticker_back_to_list")
-            ])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(msg, reply_markup=reply_markup)
+        # 显示删除选择（分页：一页最多 10 个按钮，文字也不会撞上 4096 上限喵~）
+        elif data.startswith("sticker_show_delete"):
+            # 页码藏在按钮数据里：sticker_show_delete_<页>，取不到就是第一页
+            page_suffix = data[len("sticker_show_delete"):]
+            page = int(page_suffix[1:]) if page_suffix.startswith("_") and page_suffix[1:].isdecimal() else 0
+            await self._show_delete_page(query, page)
         
         # 执行删除
         elif data.startswith("sticker_del_"):
-            index = int(data.replace("sticker_del_", ""))
+            index_text = data[len("sticker_del_"):]
+            if not index_text.isdecimal():
+                await query.edit_message_text("😅 这个操作已经失效了，重新打开收藏列表试试~")
+                return
+            index = int(index_text)
             stickers_data = _load_stickers()
             
             if 0 <= index < len(stickers_data["stickers"]):

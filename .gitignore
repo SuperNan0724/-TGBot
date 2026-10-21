@@ -10,6 +10,12 @@
 # 唯一的补救办法是去 @BotFather 用 /revoke 换一把新的。
 src/config.py
 config.py
+src/config.py.bak
+
+# 容器 / systemd 部署用的环境变量文件（含同样的 Token 和 Key）
+.env
+.env.*
+!.env.example
 
 # ─────────────────────────────────────────────
 #  💾 运行时数据（含用户对话、白名单等隐私）

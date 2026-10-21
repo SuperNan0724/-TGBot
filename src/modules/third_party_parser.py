@@ -213,8 +213,17 @@ def normalize(raw: dict) -> dict:
             "music": str | None,
         }
     """
-    # 大多数服务把数据塞在 data 里
-    payload = raw.get("data") if isinstance(raw.get("data"), (dict, list)) else raw
+    # 大多数服务把数据塞在 data 里。
+    # 但有的服务直接返回**顶层数组**（ [{"play": "..."}] ），甚至返回字符串/数字。
+    # 原来这里无条件 raw.get("data")，遇到数组就抛 AttributeError，
+    # 整条第三方解析路径直接崩掉（上层只看到一句"解析异常"）。
+    if isinstance(raw, dict):
+        payload = raw.get("data") if isinstance(raw.get("data"), (dict, list)) else raw
+    elif isinstance(raw, list):
+        payload = raw
+    else:
+        logger.info(f"第三方接口返回的结构无法解析（{type(raw).__name__}），按空结果处理")
+        payload = {}
     if isinstance(payload, list) and payload:
         payload = payload[0]
 
@@ -274,6 +283,29 @@ def should_use(platform_label: str) -> bool:
     return platform_label in LINK_THIRD_PARTY_PLATFORMS
 
 
+def _is_success_code(code) -> bool:
+    """
+    判断接口返回的业务码是不是"成功"~
+
+    为什么不能写成 `code not in (None, 0, "0", 200, "200", True)`？
+      Python 里 `1 == True`、`False == 0`，元组包含判断走的是 ==，
+      所以真正的错误码 **1 会命中 True** 被当成成功处理 —— 接口给的
+      错误提示（msg）就这么丢了，上层只剩一句含糊的"接口没有返回媒体地址"，
+      用户根本看不出是链接失效还是服务挂了。
+    这里按**类型**分支判断，不让 bool 和 int 隐式相等。
+    """
+    if code is None:
+        return True
+    if isinstance(code, bool):
+        # bool 是 int 的子类，这个分支必须排在 int 前面
+        return code is True
+    if isinstance(code, (int, float)):
+        return code in (0, 200)
+    if isinstance(code, str):
+        return code.strip() in ("", "0", "200")
+    return False
+
+
 async def parse(url: str, platform_label: str = ""):
     """
     解析链接：抖音走直连（带 Cookie），其它走第三方接口~
@@ -330,7 +362,7 @@ async def parse(url: str, platform_label: str = ""):
     # 接口自身的错误码（各家不一样，常见的 code/status/ret）
     if isinstance(raw, dict):
         code = raw.get("code", raw.get("status", raw.get("ret")))
-        if code not in (None, 0, "0", 200, "200", True):
+        if not _is_success_code(code):
             msg = raw.get("msg") or raw.get("message") or raw.get("error") or ""
             logger.info(f"第三方接口返回错误码 {code}: {msg}")
             # 把接口的原始提示带出去，方便用户判断是链接失效还是服务挂了

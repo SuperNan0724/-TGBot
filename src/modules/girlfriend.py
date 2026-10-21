@@ -133,6 +133,34 @@ def get_gf_prompt(gf_id, user_name="宝贝"):
         return gf["prompt"].format(name=user_name)
     return None
 
+# 存储的 id 认不出来时回退到这个性格
+DEFAULT_GF_ID = "loli_gf"
+
+# 已经告警过的坏 id，避免同一条错误每条消息都刷一次日志
+_warned_gf_ids = set()
+
+
+def normalize_gf_id(gf_id):
+    """
+    校验存储的女友性格 id~
+
+    认得出来就原样返回；认不出来就回退 DEFAULT_GF_ID（只告警一次）。
+    手改 user_data.json 或过期的 gf_select_* 回调都会塞进不存在的 id，
+    以前这种情况 get_gf_prompt 返回 None、聊天处理器直接 return，
+    表现就是"机器人突然完全不说话了"。
+    """
+    if isinstance(gf_id, str) and gf_id in GIRLFRIEND_PERSONALITIES:
+        return gf_id
+    try:
+        first_warning = gf_id not in _warned_gf_ids
+        _warned_gf_ids.add(gf_id)
+    except TypeError:
+        # 手改成 list/dict 这种不可哈希的值时没法去重，照样告警
+        first_warning = True
+    if first_warning:
+        logger.warning(f"⚠️ 存储的女友性格 id 无效（{gf_id!r}），已回退到 {DEFAULT_GF_ID}~")
+    return DEFAULT_GF_ID
+
 # ============================================================
 # 💕 女朋友模块主类
 # ============================================================
@@ -238,6 +266,14 @@ class GirlfriendModule(BaseModule):
         
         if data.startswith("gf_select_"):
             gf_id = data.replace("gf_select_", "")
+            
+            # 只接受已知的性格 id：来路不明的回调数据存进去，聊天会永久静默
+            if gf_id not in GIRLFRIEND_PERSONALITIES:
+                logger.warning(f"⚠️ 收到未知的女友性格回调：{data!r}，已忽略~")
+                await query.edit_message_text(
+                    "😳 这个女友性格好像不存在了呢~\n发 /girlfriend 重新挑一个吧！"
+                )
+                return
             
             user_data = self.dm.get_user_data(user_id)
             user_data["girlfriend_mode"] = gf_id
@@ -370,6 +406,14 @@ class GirlfriendModule(BaseModule):
         
         if not current_gf:
             return
+        
+        # 存储的 id 可能已经不认识（手改 user_data.json / 过期的 gf_select_* 回调）：
+        # 以前这里会静默 return，整个私聊就彻底不说话了；现在回退默认值并把存储一起修好~
+        fixed_gf = normalize_gf_id(current_gf)
+        if fixed_gf != current_gf:
+            user_data["girlfriend_mode"] = fixed_gf
+            self.dm.save_user_data(user_id, user_data)
+        current_gf = fixed_gf
         
         user_message = update.message.text
         

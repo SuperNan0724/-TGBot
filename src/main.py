@@ -39,35 +39,105 @@ def _setup_console_encoding():
 _setup_console_encoding()
 
 
-def _apply_config_defaults() -> list:
+def _coerce_env_value(raw: str, current):
     """
-    老版本 config.py 缺少新增配置项时，用 config.example.py 的默认值补齐~
+    把环境变量字符串转成和默认值同类型的对象~
 
-    各功能模块都是 `from config import X` 的写法，键不存在会直接 ImportError，
-    于是「升级后某些模块整块加载失败」，而报错指在模块里、看不出是配置缺项。
-    用户已经写进 config.py 的值一律不覆盖。
+    配置文件里全是 Python 字面量（bool / int / tuple），而环境变量天生是字符串。
+    直接覆盖会出两种事故：
+      • `if DISABLE_THINKING:` 对非空字符串永远为真 → 开关反了
+      • CALLBACK_PORT 变成 "8080"，aiohttp 绑端口时报 TypeError
+    所以必须按默认值的类型转换。
     """
+    if isinstance(current, bool):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(current, int):
+        return int(raw)
+    if isinstance(current, float):
+        return float(raw)
+    if isinstance(current, tuple):
+        return tuple(part.strip() for part in raw.split(",") if part.strip())
+    if current is None:
+        # BOT_OWNER_ID 这种默认是 None 的项：能当数字就当数字
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _apply_env_overrides(config) -> list:
+    """
+    用同名环境变量覆盖配置项（容器 / 云平台 / systemd 部署用）~
+
+    12-factor 风格：容器里不必再挂一份 config.py，`TELEGRAM_BOT_TOKEN=xxx`
+    这种环境变量优先级最高。转换失败的值会被忽略（不会因为写错一个环境变量
+    就起不来），最终生效的键名会打到日志里，方便核对。
+    """
+    overridden = []
+    for name in dir(config):
+        if not name.isupper():
+            continue
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = _coerce_env_value(raw, getattr(config, name))
+        except (TypeError, ValueError):
+            continue
+        setattr(config, name, value)
+        overridden.append(name)
+    return overridden
+
+
+def _load_example_config():
+    """把 config.example.py 当成一个普通模块加载出来~"""
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.example.py")
+    spec = importlib.util.spec_from_file_location("_config_example", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prepare_config():
+    """
+    准备 config 模块~ 返回 (补齐的键, 被环境变量覆盖的键)
+
+    做三件事，顺序不能乱：
+    1. 没有 config.py 时（容器 / 云平台只给环境变量），直接把 config.example.py
+       注入成 `config` —— 各模块都是 `from config import X`，没有这个模块
+       它们全都会 ImportError。
+    2. 用模板补齐 config.py 里缺失的新增配置项（老版本升级路径）。
+    3. 用同名环境变量覆盖，方便容器化 / systemd 部署。
+    """
+    example = _load_example_config()
+    if example is None:
+        return [], []
+
     try:
-        import importlib.util
         import config
+    except ModuleNotFoundError as exc:
+        # 只有"确实没有 config.py"才兜底；config.py 内部缺别的包必须如实报错，
+        # 否则用户会以为配置没生效，实际是自己少装了依赖
+        if exc.name != "config":
+            raise
+        config = _load_example_config()
+        if config is None:
+            return [], []
+        sys.modules["config"] = config
 
-        example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.example.py")
-        spec = importlib.util.spec_from_file_location("_config_example", example_path)
-        if spec is None or spec.loader is None:
-            return []
-        example = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(example)
+    added = []
+    for name in dir(example):
+        if not name.isupper() or hasattr(config, name):
+            continue
+        setattr(config, name, getattr(example, name))
+        added.append(name)
 
-        added = []
-        for name in dir(example):
-            if not name.isupper() or hasattr(config, name):
-                continue
-            setattr(config, name, getattr(example, name))
-            added.append(name)
-        return added
-    except Exception:
-        # 兼容层只是兜底，绝不能因为它自己出错就挡住启动
-        return []
+    return added, _apply_env_overrides(config)
 
 
 from telegram import Update
@@ -76,8 +146,13 @@ from telegram.ext import Application, ContextTypes
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ⚠️ 必须在下面任何 `from config import ...` 之前补齐，否则缺键直接 ImportError
-_CONFIG_DEFAULTS_ADDED = _apply_config_defaults()
+# ⚠️ 必须在下面任何 `from config import ...` 之前完成：
+# 没 config.py 时注入模板、缺键补齐、环境变量覆盖，都在这一步做完
+try:
+    _CONFIG_FILLED, _CONFIG_FROM_ENV = _prepare_config()
+except Exception as _exc:  # 兜底层绝不能挡住启动，让后面的真实错误照常暴露
+    _CONFIG_FILLED, _CONFIG_FROM_ENV = [], []
+    print(f"⚠️ 配置预处理失败（按原样继续）: {_exc}")
 
 from config import TELEGRAM_BOT_TOKEN, BOT_NAME
 from modules.module_loader import ModuleLoader
@@ -90,11 +165,17 @@ from modules.anime_logger import setup_anime_logging, print_banner, print_module
 setup_anime_logging()
 logger = logging.getLogger(__name__)
 
-if _CONFIG_DEFAULTS_ADDED:
+if _CONFIG_FROM_ENV:
+    logger.info(
+        f"🌍 已用环境变量覆盖 {len(_CONFIG_FROM_ENV)} 个配置项："
+        f"{', '.join(_CONFIG_FROM_ENV)}"
+    )
+
+if _CONFIG_FILLED:
     logger.warning(
-        f"⚠️ config.py 缺少 {len(_CONFIG_DEFAULTS_ADDED)} 个配置项，"
+        f"⚠️ config.py 缺少 {len(_CONFIG_FILLED)} 个配置项，"
         f"已用 config.example.py 的默认值补齐：\n"
-        f"   └─ {', '.join(_CONFIG_DEFAULTS_ADDED)}\n"
+        f"   └─ {', '.join(_CONFIG_FILLED)}\n"
         f"      需要自定义的话，把这些项复制到 config.py 里就好~"
     )
 
@@ -487,12 +568,132 @@ class BotApp:
             logger.info("👋 小南已经休息啦~ 下次再见喵！")
 
 
+def _self_check() -> int:
+    """
+    部署自检：不联网、不启动机器人，只回答"这套配置能不能跑起来"~
+
+    用法：
+        python main.py --check          # 本地 / systemd 装完验一下
+        docker run --rm -e TELEGRAM_BOT_TOKEN=xxx telegram-bot:local python main.py --check
+
+    返回码：0 = 关键项齐全；1 = 缺少必需配置（会写清楚缺什么）。
+    """
+    print()
+    print("=" * 56)
+    print("  小南专属TGbot —— 部署自检")
+    print("=" * 56)
+
+    problems = []
+    warnings = []
+
+    # 1. Token
+    token = (TELEGRAM_BOT_TOKEN or "").strip()
+    if not token or token == "YOUR_TELEGRAM_BOT_TOKEN":
+        problems.append("TELEGRAM_BOT_TOKEN 还没填（@BotFather 的 /newbot 会给）")
+    else:
+        # 只显示指纹，别把 Token 打进日志/截图
+        print(f"  ✅ Telegram Token：已配置（…{token[-4:]}）")
+
+    # 2. 主人 ID
+    try:
+        import config as _cfg
+        bot_owner = getattr(_cfg, "BOT_OWNER_ID", None)
+    except Exception:
+        bot_owner = None
+    if bot_owner in (None, "", 0):
+        warnings.append("BOT_OWNER_ID 未设置：主人专属命令（收藏贴纸、白名单管理）不可用")
+    else:
+        print(f"  ✅ 主人 ID：{bot_owner}")
+
+    # 3. AI / 代理
+    try:
+        import config as _cfg
+        api_key = (getattr(_cfg, "DEEPSEEK_API_KEY", "") or "").strip()
+        proxy_url = (getattr(_cfg, "PROXY_URL", "") or "").strip()
+    except Exception:
+        api_key, proxy_url = "", ""
+    if not api_key or api_key == "YOUR_DEEPSEEK_API_KEY":
+        warnings.append("DEEPSEEK_API_KEY 未配置：AI 聊天 / 性格 / 思考 / 女友模式不可用")
+    else:
+        print("  ✅ DeepSeek Key：已配置")
+    print(f"  {'✅' if proxy_url else '·'} 代理：{proxy_url or '未配置（国内网络连不上 Telegram 时必填）'}")
+
+    # 4. 依赖
+    try:
+        import telegram
+
+        print(f"  ✅ python-telegram-bot：{telegram.__version__}")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"依赖没装好（import telegram 失败）：{exc}")
+    try:
+        import aiohttp
+
+        print(f"  ✅ aiohttp：{aiohttp.__version__}")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"依赖没装好（import aiohttp 失败）：{exc}")
+    try:
+        import yt_dlp
+
+        print(f"  ✅ yt-dlp：{yt_dlp.version.__version__}")
+    except Exception:
+        warnings.append("yt-dlp 未安装：链接解析（视频/图片）不可用")
+
+    # 5. ffmpeg
+    try:
+        from modules.net_helpers import find_ffmpeg
+
+        ffmpeg = find_ffmpeg()
+        if ffmpeg:
+            print(f"  ✅ ffmpeg：{ffmpeg}")
+        else:
+            warnings.append("找不到 ffmpeg：B 站等站点的视频下载不下来（只能发链接）")
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"ffmpeg 检测失败：{exc}")
+
+    # 6. 数据目录可写
+    try:
+        import config as _cfg
+
+        data_dir = getattr(_cfg, "DATA_DIR", "data")
+        os.makedirs(data_dir, exist_ok=True)
+        probe = os.path.join(data_dir, ".write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        print(f"  ✅ 数据目录可写：{os.path.abspath(data_dir)}")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"数据目录不可写（{exc}）：白名单/用户数据存不下来")
+
+    # 7. 配置来源
+    if _CONFIG_FROM_ENV:
+        print(f"  ✅ 环境变量覆盖了 {len(_CONFIG_FROM_ENV)} 项")
+    if _CONFIG_FILLED:
+        print(f"  ✅ 模板补齐了 {len(_CONFIG_FILLED)} 项（老 config.py 缺新键，正常）")
+
+    print("-" * 56)
+    for item in problems:
+        print(f"  ❌ {item}")
+    for item in warnings:
+        print(f"  ⚠️  {item}")
+    if not problems and not warnings:
+        print("  🎉 全部检查通过，可以直接启动啦~")
+    elif not problems:
+        print("  ✅ 关键项齐全，上面的告警只影响可选功能")
+    print("=" * 56)
+    print()
+
+    return 1 if problems else 0
+
+
 def main():
     """主函数~ 一切从这里开始！"""
     # 配置里的 data/ 路径都是相对 src/ 的，两个启动器也都是先 chdir 到 src/
     # 再拉起本文件；直接 `python src/main.py` 时如果 cwd 是项目根目录，
     # 数据就会写到另一个 data/ 目录（看起来像"数据全丢了"）
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+    if "--check" in sys.argv:
+        sys.exit(_self_check())
 
     bot = BotApp()
     try:

@@ -20,20 +20,42 @@ FUN_DATA_FILE = "data/fun_data.json"
 
 def _load_fun_data():
     """加载娱乐数据~"""
+    data = None
     if os.path.exists(FUN_DATA_FILE):
         try:
             with open(FUN_DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return {"pet": {}, "minesweeper": {}, "blackjack": {}}
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"读取娱乐数据失败，先用默认值喵~: {e}")
+            data = None
+    if not isinstance(data, dict):
+        data = {}
+    # 老版本 / 手改 / 写到一半的文件可能缺键，补齐成代码期待的字典形状喵~
+    for key in ("pet", "minesweeper", "blackjack"):
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+    return data
 
 
 def _save_fun_data(data):
-    """保存娱乐数据~"""
-    os.makedirs(os.path.dirname(FUN_DATA_FILE), exist_ok=True)
-    with open(FUN_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """保存娱乐数据~
+
+    以前这里没有 try/except：数据目录不可写或磁盘满，异常会直接冲出
+    handler 变成一次未处理错误，用户看到的是报错而不是"没存上"。
+    存不下不影响这一局的玩法，所以只记日志。
+    """
+    try:
+        parent = os.path.dirname(FUN_DATA_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = f"{FUN_DATA_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, FUN_DATA_FILE)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"保存娱乐数据失败（数据没存下来，但不影响继续玩）: {e}")
+        return False
 
 
 class Fun(BaseModule):
@@ -382,7 +404,12 @@ class Fun(BaseModule):
         data = _load_fun_data()
         pet_data = data["pet"]
         
-        if user_id not in pet_data:
+        pet = pet_data.get(user_id)
+        if not isinstance(pet, dict):
+            # 存档里这只宠物要是被手改成字符串了，就当还没养过、重新领一只喵~
+            pet = None
+        
+        if pet is None:
             pet_types = ["🐱 小猫咪", "🐶 小狗狗", "🐰 小兔子", "🐼 小熊猫", "🦊 小狐狸", "🐸 小青蛙", "🐻 小熊", "🐯 小老虎", "🦁 小狮子"]
             pet_type = random.choice(pet_types)
             pet_data[user_id] = {
@@ -413,7 +440,12 @@ class Fun(BaseModule):
             )
             return
         
-        pet = pet_data[user_id]
+        # 旧版本 / 手改的文件可能缺字段或把数值写成字符串，补成代码要用的形状喵~
+        for key, default in (("hunger", 100), ("happiness", 100), ("energy", 100)):
+            if not isinstance(pet.get(key), int):
+                pet[key] = default
+        pet.setdefault("name", f"{user_name}的宠物")
+        pet.setdefault("birthday", "未知")
         
         if context.args:
             action = context.args[0].lower()
@@ -516,6 +548,28 @@ class Fun(BaseModule):
         data = _load_fun_data()
         game_data = data["minesweeper"]
         
+        def _valid_game(game):
+            """手改过的存档可能是字符串或形状不对，先验一下再玩喵~"""
+            if not isinstance(game, dict):
+                return False
+            size = game.get("size")
+            if not isinstance(size, int) or size < 1 or not isinstance(game.get("mines"), int):
+                return False
+            if not isinstance(game.get("game_over"), bool):
+                return False
+            board, revealed = game.get("board"), game.get("revealed")
+            if not isinstance(board, list) or not isinstance(revealed, list):
+                return False
+            if len(board) != size or len(revealed) != size:
+                return False
+            for row in board:
+                if not (isinstance(row, list) and len(row) == size and all(isinstance(v, int) for v in row)):
+                    return False
+            for row in revealed:
+                if not (isinstance(row, list) and len(row) == size and all(isinstance(v, bool) for v in row)):
+                    return False
+            return True
+        
         if context.args and context.args[0] == "new":
             size = 5
             mines = 5
@@ -551,11 +605,11 @@ class Fun(BaseModule):
             return
         
         if context.args and context.args[0] == "open" and len(context.args) >= 3:
-            if user_id not in game_data:
+            game = game_data.get(user_id)
+            if not _valid_game(game):
                 await update.message.reply_text("😅 还没有游戏~ 用 /minesweeper new 开始吧！")
                 return
             
-            game = game_data[user_id]
             if game["game_over"]:
                 await update.message.reply_text("💥 游戏结束了~ 用 /minesweeper new 重新开始吧！")
                 return
@@ -633,6 +687,16 @@ class Fun(BaseModule):
         data = _load_fun_data()
         game_data = data["blackjack"]
         
+        def _valid_game(game):
+            """手改过的存档可能是字符串或写着不存在的牌，先验一下再玩喵~"""
+            if not isinstance(game, dict):
+                return False
+            cards = {"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"}
+            player, dealer = game.get("player"), game.get("dealer")
+            if not isinstance(player, list) or not isinstance(dealer, list):
+                return False
+            return all(isinstance(c, str) and c in cards for c in player + dealer)
+        
         def draw_card():
             cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
             return random.choice(cards)
@@ -687,11 +751,11 @@ class Fun(BaseModule):
             return
         
         if context.args and context.args[0] == "hit":
-            if user_id not in game_data or game_data[user_id]["game_over"]:
+            game = game_data.get(user_id)
+            if not _valid_game(game) or game.get("game_over"):
                 await update.message.reply_text("😅 没有进行中的游戏~ 用 /blackjack new 开始吧！")
                 return
             
-            game = game_data[user_id]
             game["player"].append(draw_card())
             player_total = calc_hand(game["player"])
             
@@ -715,11 +779,11 @@ class Fun(BaseModule):
             return
         
         if context.args and context.args[0] == "stand":
-            if user_id not in game_data or game_data[user_id]["game_over"]:
+            game = game_data.get(user_id)
+            if not _valid_game(game) or game.get("game_over"):
                 await update.message.reply_text("😅 没有进行中的游戏~ 用 /blackjack new 开始吧！")
                 return
             
-            game = game_data[user_id]
             game["game_over"] = True
             
             while calc_hand(game["dealer"]) < 17:

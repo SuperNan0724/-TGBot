@@ -1,0 +1,52 @@
+# 小南专属TGbot —— Docker Compose 一键部署
+#
+# 用法（仓库根目录）：
+#   cp .env.example .env      # 填 TELEGRAM_BOT_TOKEN，国内再填 PROXY_URL
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 配置走 .env（同名环境变量会覆盖 config.example.py 的默认值），
+# 不需要在容器里放 config.py。
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内构建慢就取消注释，或在 .env 里写 PIP_INDEX_URL=清华源
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    image: telegram-bot:local
+    container_name: telegram-bot
+    restart: unless-stopped
+
+    # .env 里的所有变量原样注入容器（config 里同名的键会被覆盖）
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+
+    volumes:
+      # 用户数据 / 白名单 / 付费记录 / 备份，必须持久化
+      - bot-data:/app/data
+      # 想用 config.py 而不是环境变量时，取消下面这行注释（二选一即可）
+      # - ./src/config.py:/app/config.py:ro
+
+    # 优雅退出：polling 收尾需要几秒，别一上来就 SIGKILL
+    stop_grace_period: 30s
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if os.path.exists('data/bot.pid') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:

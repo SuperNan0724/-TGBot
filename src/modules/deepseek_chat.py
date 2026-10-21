@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTORY_LENGTH, BOT_NAME_SHORT, DEFAULT_PERSONALITY
@@ -196,9 +197,19 @@ class DeepSeekChat(BaseModule):
 
     async def _send_role_page(self, message, context, user_id, current_role, edit=False):
         """发送性格选择翻页菜单~"""
-        page = context.user_data.get("role_page", 0)
         per_page = 9  # 每页9个性格（3行x3列）
-        total_pages = (len(PERSONALITY_LIST) + per_page - 1) // per_page
+        total_pages = max(1, (len(PERSONALITY_LIST) + per_page - 1) // per_page)
+
+        # 页码存在 user_data 里，可能是过期内联按钮留下的脏值（-1 / 6 / 99）：
+        # 越界时会渲染出 0 个性格按钮和 "0/6" 这种假页码，所以先夹回合法范围再回写~
+        page = context.user_data.get("role_page", 0)
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            page = 0
+        page = max(0, min(page, total_pages - 1))
+        context.user_data["role_page"] = page
+
         start = page * per_page
         end = min(start + per_page, len(PERSONALITY_LIST))
         page_items = PERSONALITY_LIST[start:end]
@@ -242,7 +253,13 @@ class DeepSeekChat(BaseModule):
         )
 
         if edit:
-            await message.edit_text(msg, reply_markup=reply_markup)
+            try:
+                await message.edit_text(msg, reply_markup=reply_markup)
+            except BadRequest as e:
+                # 页码被夹回原位时，渲染结果可能和消息里已有的完全一样，
+                # Telegram 会回 "Message is not modified"；这不是错误，忽略掉就好~
+                if "not modified" not in str(e).lower():
+                    raise
         else:
             await message.reply_text(msg, reply_markup=reply_markup)
 
@@ -361,6 +378,11 @@ class DeepSeekChat(BaseModule):
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理普通消息~"""
         chat_type = update.effective_chat.type
+        # 频道里发的帖子没有发送者用户（channel_post），effective_user 为 None；
+        # 这个 handler 的 filter 没限制聊天类型，所以必须在取值前挡掉，
+        # 否则每个频道帖子都会抛 AttributeError 进错误处理器。
+        if update.effective_user is None:
+            return
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         

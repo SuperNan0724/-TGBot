@@ -53,6 +53,21 @@ from .helpers import get_time_context
 
 logger = logging.getLogger(__name__)
 
+# yt-dlp 下载超时（秒）~
+# 提取元数据有 LINK_EXTRACT_TIMEOUT 兜底，**下载也必须有个上限**：
+# yt-dlp 卡住时（站点假死、连接不返回数据）handler 会永远等下去，
+# 用户连一句"超时了"都收不到，还占着线程和临时目录。
+# 下载本身比提取慢，给 4 倍余量，最少 1 分钟。
+def _safe_int(value, default: int) -> int:
+    """把配置值安全地转成 int：手写成 "45s" 这类字符串时回落到默认值喵~"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+LINK_DOWNLOAD_TIMEOUT = max(60, _safe_int(LINK_EXTRACT_TIMEOUT, 0) * 4)
+
 # ── 链接匹配 ────────────────────────────────────────────────
 URL_PATTERN = re.compile(
     r"https?://[^\s<>\"'\)\]\}]+",
@@ -517,7 +532,15 @@ class LinkParser(BaseModule):
         # 汇总多余的文字结果
         notes = [r for r in results if r]
         if notes:
-            await status.edit_text("\n\n".join(notes))
+            # 状态消息可能已经被用户删掉了，edit_text 会抛 BadRequest。
+            # 这里必须把异常吞掉：一旦它逃出 handler，下面的
+            # raise ApplicationHandlerStop 就不会执行，PTB 只会把异常交给
+            # 错误处理器，然后**继续**把同一条消息派给 group 0 的
+            # deepseek_chat —— 用户会收到两条互不相干的回复。
+            try:
+                await status.edit_text("\n\n".join(notes))
+            except Exception as e:
+                logger.debug(f"更新状态消息失败（用户可能删了消息）: {e}")
         else:
             try:
                 await status.delete()
@@ -929,7 +952,25 @@ class LinkParser(BaseModule):
                 ydl.download([url])
 
         try:
-            await asyncio.to_thread(_run)
+            # 必须用 wait_for 加个上限：yt-dlp 卡住时 to_thread 会一直挂着，
+            # handler 就永远返回不了，用户连报错都看不到。
+            await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=LINK_DOWNLOAD_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            # ⚠️ wait_for 只是让 handler 不再等，**线程本身杀不掉** ——
+            # asyncio.to_thread 里的 yt-dlp 还在后台跑，可能继续往 tmpdir 写文件。
+            # 所以这里只能：先删目录让它写失败、自然结束，然后照常报超时。
+            logger.warning(
+                f"yt-dlp 下载超时（{LINK_DOWNLOAD_TIMEOUT} 秒）: {url} "
+                "— 线程仍在后台运行，无法取消"
+            )
+            self._last_reason = (
+                f"下载超时（{LINK_DOWNLOAD_TIMEOUT} 秒内没下完），"
+                "可能是站点太慢或文件太大"
+            )
+            _cleanup()
+            return None
         except Exception as e:
             err = str(e)
             logger.warning(f"yt-dlp 下载失败: {err[:200]}")
@@ -1402,7 +1443,12 @@ class LinkParser(BaseModule):
                     pass
         except Exception as e:
             logger.error(f"链接解析命令失败: {e}", exc_info=True)
-            await status.edit_text("呜… 这个链接小南看不懂呢(｡•́︿•̀｡)")
+            # 同上：这条编辑也可能因为状态消息被删而抛异常。
+            # 不包起来的话 ApplicationHandlerStop 会被跳过，消息落到聊天模块。
+            try:
+                await status.edit_text("呜… 这个链接小南看不懂呢(｡•́︿•̀｡)")
+            except Exception as edit_err:
+                logger.debug(f"更新状态消息失败（用户可能删了消息）: {edit_err}")
 
         # 手动命令同样要阻断后续，免得 deepseek_chat 又回一条
         raise ApplicationHandlerStop

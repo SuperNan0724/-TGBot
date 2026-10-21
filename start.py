@@ -378,27 +378,33 @@ def run_bot():
 def run_docker():
     """使用 Docker 启动"""
     root = get_project_root()
-    deploy_dir = os.path.join(root, "src", "deploy")
-    
+
     print(f"\n{Colors.BLUE}🐳 使用 Docker 启动...{Colors.RESET}")
-    
+
+    # compose 文件在仓库根目录（构建上下文必须是根目录，
+    # 因为 Dockerfile 要 COPY src/。以前它在 src/deploy 下，已经搬走了）
+    compose_file = os.path.join(root, "docker-compose.yml")
+    if not os.path.exists(compose_file):
+        print(f"{Colors.RED}❌ 找不到 docker-compose.yml{Colors.RESET}")
+        return False
+
+    # .env 里放 Token；没有的话 compose 会直接报错，先提醒一句
+    env_file = os.path.join(root, ".env")
+    if not os.path.exists(env_file):
+        print(f"{Colors.YELLOW}⚠️  还没有 .env（容器里不带 config.py，配置靠环境变量）{Colors.RESET}")
+        print(f"{Colors.YELLOW}   请先复制模板并填 Token：{Colors.RESET}")
+        print(f"{Colors.CYAN}     copy .env.example .env{Colors.RESET}")
+        return False
+
     try:
-        # 先检查 docker-compose.yml
-        compose_file = os.path.join(deploy_dir, "docker-compose.yml")
-        if not os.path.exists(compose_file):
-            print(f"{Colors.RED}❌ 找不到 docker-compose.yml{Colors.RESET}")
-            return False
-        
-        # 切换到 deploy 目录
-        os.chdir(deploy_dir)
-        
-        # 启动 Docker Compose
-        subprocess.run(["docker", "compose", "up", "-d"], check=True)
-        
+        # 切到仓库根目录再起 compose（相对路径、卷挂载都按根目录算）
+        os.chdir(root)
+        subprocess.run(["docker", "compose", "up", "-d", "--build"], check=True)
+
         print(f"{Colors.GREEN}✅ Docker 容器已启动！{Colors.RESET}")
         print(f"{Colors.CYAN}   查看日志：docker compose logs -f{Colors.RESET}")
         print(f"{Colors.CYAN}   停止：docker compose down{Colors.RESET}")
-        
+
         return True
     except subprocess.CalledProcessError as e:
         print(f"{Colors.RED}❌ Docker 启动失败：{e}{Colors.RESET}")

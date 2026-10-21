@@ -1,0 +1,44 @@
+[Unit]
+Description=小南专属TGbot (Telegram bot)
+Documentation=https://github.com/SuperNan0724/-TGBot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ⚠️ 下面三个路径按你的实际安装位置改（默认按 /opt/telegram-bot 布局）
+# 如果把仓库放在 /opt/telegram-bot，且虚拟环境建在仓库根目录 .venv，就不用改
+WorkingDirectory=/opt/telegram-bot/src
+ExecStart=/opt/telegram-bot/.venv/bin/python -u /opt/telegram-bot/src/main.py
+
+# 配置优先用 /etc/telegram-bot.env（环境变量，权限 600），
+# 没有这个文件也能跑（回落到 src/config.py）
+# 环境变量名与 config.example.py 里的配置项同名
+EnvironmentFile=-/etc/telegram-bot.env
+
+# 想用专用账号跑的话，先 useradd -r -s /sbin/nologin telegram-bot，
+# 再把日志目录和数据目录 chown 给它，然后取消下面两行注释
+# User=telegram-bot
+# Group=telegram-bot
+
+Restart=always
+RestartSec=5
+
+# 优雅停止：polling 收尾、pid 清理都需要一点时间
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-bot
+
+# 基础加固：不给提权、不给写系统目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/telegram-bot
+
+[Install]
+WantedBy=multi-user.target

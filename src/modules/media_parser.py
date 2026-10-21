@@ -65,6 +65,30 @@ def _human_size(num_bytes: int) -> str:
         size /= 1024
 
 
+def _safe_int(value, default: int) -> int:
+    """
+    把 settings.json 里读出来的值安全地转成整数~
+
+    为什么不能直接 int()？
+      settings.json 是给人手改的，写成 `"max_frames": null`、`"六"` 都算常见。
+      int(None) 抛 TypeError、int("六") 抛 ValueError —— 一抛出来整个媒体
+      handler 就崩了，用户发图/发视频连一句回复都收不到。
+      转不动就退回默认值：设置没生效，但功能照常能用。
+
+    Args:
+        value: 原始值（可能是 None / str / bool / float）
+        default: 转换失败时用的默认整数
+    """
+    if isinstance(value, bool):
+        # True/False 不是"数值"：别让 max_frames=true 变成只抽 1 帧
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"设置值 {value!r} 不是整数，改用默认值 {default}")
+        return default
+
+
 def _has_ffmpeg() -> bool:
     """
     检查 ffmpeg 是否可用~
@@ -153,7 +177,10 @@ class MediaParser(BaseModule):
 
     def _cooldown_left(self, user_id: int) -> int:
         """距离下次可用还剩几秒~ 主人不受限流影响"""
-        cooldown = int(self._settings.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS))
+        cooldown = _safe_int(
+            self._settings.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS),
+            DEFAULT_COOLDOWN_SECONDS,
+        )
         if cooldown <= 0 or self.dm.is_owner(user_id):
             return 0
         last = self._last_call.get(user_id, 0)
@@ -436,7 +463,9 @@ class MediaParser(BaseModule):
 
     async def _extract_frames(self, video_bytes: bytes) -> list:
         """用 ffmpeg 均匀抽帧，返回 JPEG 字节列表~"""
-        max_frames = int(self._settings.get("max_frames", DEFAULT_MAX_FRAMES))
+        max_frames = _safe_int(
+            self._settings.get("max_frames", DEFAULT_MAX_FRAMES), DEFAULT_MAX_FRAMES
+        )
         tmpdir = tempfile.mkdtemp(prefix="nan_video_")
         proc = None             # 超时要靠它把 ffmpeg 杀掉，见下面的 except
         try:
@@ -446,8 +475,11 @@ class MediaParser(BaseModule):
 
             # 先取时长，决定抽帧间隔
             duration = await self._probe_duration(video_path)
+            # max_frames 可能被手改成 0 或负数（settings.json），
+            # duration / 0 会 ZeroDivisionError，负数会让 ffmpeg 参数非法
+            frames_per_video = max_frames if max_frames > 0 else DEFAULT_MAX_FRAMES
             if duration and duration > 0:
-                interval = max(1.0, duration / max_frames)
+                interval = max(1.0, duration / frames_per_video)
             else:
                 interval = VIDEO_FRAME_SAMPLE_SECONDS
 
@@ -459,7 +491,7 @@ class MediaParser(BaseModule):
                 ffmpeg_exe, "-hide_banner", "-loglevel", "error",
                 "-i", video_path,
                 "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2",
-                "-frames:v", str(max_frames),
+                "-frames:v", str(frames_per_video),
                 "-q:v", "4",
                 "-y", out_pattern,
             ]
@@ -668,15 +700,20 @@ class MediaParser(BaseModule):
         if not text:
             text = "小南看完了，但不知道该怎么形容呢~"
 
-        if len(text) <= 4000:
-            await status_message.edit_text(text)
-            return
+        # 状态消息可能已经被用户删掉，edit_text 会抛 BadRequest；
+        # 这里纯粹是"顺手更新一下进度"，失败不该让整个 handler 报错
+        try:
+            if len(text) <= 4000:
+                await status_message.edit_text(text)
+                return
 
-        # 太长：第一条编辑进去，剩下的分条发
-        chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
-        await status_message.edit_text(chunks[0])
-        for chunk in chunks[1:]:
-            await status_message.reply_text(chunk)
+            # 太长：第一条编辑进去，剩下的分条发
+            chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
+            await status_message.edit_text(chunks[0])
+            for chunk in chunks[1:]:
+                await status_message.reply_text(chunk)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"更新状态消息失败（不影响结果）: {e}")
 
     # ──────────────────────────────────────────
     #  命令
@@ -686,7 +723,15 @@ class MediaParser(BaseModule):
         """/media - 查看媒体解析状态~"""
         user_id = update.effective_user.id
         enabled = self._settings.get("enabled", True)
-        cooldown = self._settings.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)
+        # 状态页也要走安全转换：settings.json 被手改成 null/字符串时，
+        # 这里不转换就会显示「最多 None 帧」「调用间隔 None 秒」
+        cooldown = _safe_int(
+            self._settings.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS),
+            DEFAULT_COOLDOWN_SECONDS,
+        )
+        max_frames = _safe_int(
+            self._settings.get("max_frames", DEFAULT_MAX_FRAMES), DEFAULT_MAX_FRAMES
+        )
 
         lines = [
             "🎬 媒体解析状态~",
@@ -694,7 +739,7 @@ class MediaParser(BaseModule):
             f"├─ 功能开关：{'✅ 已开启' if enabled else '⛔ 已关闭'}",
             f"├─ 视觉模型：`{VISION_MODEL}`",
             f"├─ ffmpeg：{'✅ 可用（支持视频抽帧）' if self._ffmpeg else '❌ 未安装（视频只能看封面）'}",
-            f"├─ 视频抽帧数：最多 {self._settings.get('max_frames', DEFAULT_MAX_FRAMES)} 帧",
+            f"├─ 视频抽帧数：最多 {max_frames} 帧",
             f"└─ 调用间隔：{cooldown} 秒",
             "",
             "直接发图片或视频给小南就能解析啦~",

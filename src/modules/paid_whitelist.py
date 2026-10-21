@@ -73,8 +73,14 @@ def _load_paid_data() -> dict:
             with open(PAID_WHITELIST_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                data.setdefault("codes", [])
-                data.setdefault("paid_users", {})
+                # 先补齐缺失字段，再校验容器类型：手改成列表/字符串时重置，
+                # 免得后面的 .append / .get 直接把命令炸掉
+                if not isinstance(data.setdefault("codes", []), list):
+                    logger.warning("⚠️ 付费白名单数据里的 codes 不是列表，已重置为空")
+                    data["codes"] = []
+                if not isinstance(data.setdefault("paid_users", {}), dict):
+                    logger.warning("⚠️ 付费白名单数据里的 paid_users 不是对象，已重置为空")
+                    data["paid_users"] = {}
                 return data
             logger.error(f"付费白名单数据格式不对（顶层应为对象）: {type(data).__name__}")
         except Exception as e:
@@ -93,6 +99,33 @@ def _save_paid_data(data: dict):
         return False
 
 
+def _normalise_products(data: dict) -> dict:
+    """补齐商品条目的默认字段：手改 products.json 少了 name/price 也不能让列表挂掉~"""
+    raw = data.get("products")
+    if not isinstance(raw, list):
+        if raw is not None:
+            logger.warning("⚠️ 商品配置里的 products 不是列表，已按空列表处理")
+        data["products"] = []
+        return data
+
+    products = []
+    for idx, prod in enumerate(raw):
+        if not isinstance(prod, dict):
+            logger.warning(f"⚠️ 商品配置里第 {idx + 1} 项不是对象，已跳过")
+            continue
+        prod = dict(prod)
+        if not prod.get("id"):
+            prod["id"] = f"product_{idx + 1}"
+        if not prod.get("name"):
+            prod["name"] = f"商品 {prod['id']}"
+        prod.setdefault("duration_days", DEFAULT_DURATION_DAYS)
+        prod.setdefault("description", "")
+        prod.setdefault("enabled", True)
+        products.append(prod)
+    data["products"] = products
+    return data
+
+
 def _load_products() -> dict:
     """加载商品配置~"""
     if os.path.exists(PRODUCTS_FILE):
@@ -100,7 +133,7 @@ def _load_products() -> dict:
             with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
+                return _normalise_products(data)
             logger.error(f"商品配置格式不对（顶层应为对象）: {type(data).__name__}")
         except Exception as e:
             logger.error(f"加载商品配置失败: {e}")
@@ -116,6 +149,121 @@ def _save_products(data: dict):
     except Exception as e:
         logger.error(f"保存商品配置失败: {e}")
         return False
+
+
+def _price_text(prod) -> str:
+    """安全取价格文案：商品缺 price / price_display 时也不能把 /buy 弄炸~"""
+    if not isinstance(prod, dict):
+        return "价格未设置"
+    price_display = prod.get("price_display")
+    if price_display not in (None, ""):
+        return str(price_display)
+    price = prod.get("price")
+    if price not in (None, ""):
+        return f"{price} 元"
+    return "价格未设置"
+
+
+def _parse_user_id(user_key) -> Optional[int]:
+    """把 paid_users 的键转成 int；非数字键跳过并记日志，别让整条命令跟着炸~"""
+    try:
+        return int(user_key)
+    except (TypeError, ValueError):
+        logger.warning(f"⚠️ paid_users 里有非数字的用户键 {user_key!r}，已跳过（请手动检查数据文件）")
+        return None
+
+
+def _activated_sort_key(item) -> str:
+    """按激活时间倒序排付费用户~
+
+    坏记录（值是 null / 字符串）直接排在最后，不能在这里抛 AttributeError，
+    否则 /paid_users 会因为一条脏数据整个用不了。
+    """
+    value = item[1] if isinstance(item, tuple) and len(item) == 2 else None
+    if isinstance(value, dict):
+        activated = value.get("activated_at")
+        if isinstance(activated, str):
+            return activated
+    return ""
+
+
+def _safe_days(value, default: int = 0) -> int:
+    """把 duration_days 转成 int~
+
+    products.json / 激活码里手写成 "30 天" 这种字符串时，timedelta(days=...)
+    会抛 TypeError，把整个购买/兑换流程打断。转换失败按 0 天处理（等于没加时长），
+    并记日志提醒去检查数据，而不是凭空多送几天。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"⚠️ 时长字段不是数字：{value!r}，按 0 天处理（请检查数据文件）")
+        return default
+
+
+def _extend_expiry(existing, duration_days: int, now: Optional[datetime] = None) -> datetime:
+    """算新的到期时间：还在有效期内就在原到期时间上叠加天数，过期/没记录就从现在算~"""
+    now = now or datetime.now()
+    base = now
+    if isinstance(existing, dict):
+        expires_str = existing.get("expires_at")
+        if expires_str:
+            try:
+                old_expiry = datetime.fromisoformat(expires_str)
+                if old_expiry > now:
+                    base = old_expiry
+            except (TypeError, ValueError):
+                pass
+    return base + timedelta(days=_safe_days(duration_days))
+
+
+def _prune_expired_users(data: dict, dm: "DataManager") -> list:
+    """清理过期付费用户（启动清理和 /clean_expired 共用这一套逻辑）~
+
+    返回被清理的用户ID列表；非数字键跳过并记日志，单条删失败也不影响其它记录~
+    """
+    paid_users = data.get("paid_users")
+    if not isinstance(paid_users, dict):
+        logger.warning("⚠️ 付费白名单数据里的 paid_users 不是对象，跳过过期清理")
+        return []
+
+    now = datetime.now()
+    expired = []
+    for user_key, info in list(paid_users.items()):
+        if not isinstance(info, dict):
+            logger.warning(f"⚠️ 付费用户 {user_key!r} 的记录不是对象，已跳过")
+            continue
+        expires_str = info.get("expires_at")
+        if not expires_str:
+            continue
+        try:
+            is_expired = now > datetime.fromisoformat(expires_str)
+        except (TypeError, ValueError):
+            # 到期时间读不出来的记录按过期处理，否则会永远卡在文件里清不掉
+            is_expired = True
+        if not is_expired:
+            continue
+        user_id = _parse_user_id(user_key)
+        if user_id is None:
+            continue
+        expired.append((user_key, user_id))
+
+    cleaned = []
+    for user_key, user_id in expired:
+        try:
+            dm.del_user(user_id)
+        except Exception as e:
+            # 白名单没删干净就先保留记录，下次清理再试，避免两边数据对不上
+            logger.error(f"移除付费用户 {user_id} 的白名单失败，本次跳过: {e}")
+            continue
+        paid_users.pop(user_key, None)
+        cleaned.append(user_id)
+        logger.info(f"⏰ 付费用户 {user_id} 已过期，已自动从白名单移除")
+
+    if cleaned:
+        data["paid_users"] = paid_users
+        _save_paid_data(data)
+    return cleaned
 
 
 # ===== 全局：用于在回调中发消息 =====
@@ -144,12 +292,15 @@ class PaidWhitelist(BaseModule):
 
     def _get_user_expiry(self, user_id: int) -> Optional[datetime]:
         user_key = str(user_id)
-        if user_key in self._data.get("paid_users", {}):
-            expires_str = self._data["paid_users"][user_key].get("expires_at")
+        record = self._data.get("paid_users", {}).get(user_key)
+        # 手改 / 老格式的 paid_users 里可能存着 null 或字符串，
+        # 直接 .get 会 AttributeError，把 /redeem、/check_expiry 一起带崩
+        if isinstance(record, dict):
+            expires_str = record.get("expires_at")
             if expires_str:
                 try:
                     return datetime.fromisoformat(expires_str)
-                except:
+                except (TypeError, ValueError):
                     pass
         return None
 
@@ -160,31 +311,8 @@ class PaidWhitelist(BaseModule):
         return datetime.now() > expires_at
 
     def _clean_expired_users(self):
-        paid_users = self._data.get("paid_users", {})
-        expired_users = []
-
-        for user_key, info in paid_users.items():
-            expires_str = info.get("expires_at")
-            if expires_str:
-                try:
-                    expires_at = datetime.fromisoformat(expires_str)
-                    if datetime.now() > expires_at:
-                        expired_users.append(int(user_key))
-                except:
-                    expired_users.append(int(user_key))
-
-        for user_id in expired_users:
-            self.dm.del_user(user_id)
-            logger.info(f"⏰ 付费用户 {user_id} 已过期，已自动从白名单移除")
-
-        for user_key in [str(uid) for uid in expired_users]:
-            if user_key in paid_users:
-                del paid_users[user_key]
-
-        if expired_users:
-            self._data["paid_users"] = paid_users
-            self._save()
-        return expired_users
+        """清理过期付费用户~（与启动清理共用 _prune_expired_users 同一套逻辑）"""
+        return _prune_expired_users(self._data, self.dm)
 
     # ────────── 给小南用的私聊发消息工具 ──────────
 
@@ -224,8 +352,8 @@ class PaidWhitelist(BaseModule):
         # 保存 application 供回调服务使用
         self.__class__._application = application
 
-        # 启动时清理已过期的付费用户（原先没人调用，过期用户会一直留在白名单里）
-        auto_cleanup()
+        # 启动时清理已过期的付费用户（和 /clean_expired 走同一套逻辑，过期记录不会留在文件里）
+        auto_cleanup(self)
 
     # ──────────────────────────────────────────
     #  用户端命令
@@ -251,7 +379,7 @@ class PaidWhitelist(BaseModule):
         for prod in enabled:
             pid = prod["id"]
             name = prod["name"]
-            price = prod.get("price_display", f"{prod['price']} 元")
+            price = _price_text(prod)
             desc = prod.get("description", "")
             msg += f"**{name}** — {price}\n  {desc}\n\n"
             keyboard.append([
@@ -310,13 +438,16 @@ class PaidWhitelist(BaseModule):
 
         duration_days = code_data.get("duration_days", DEFAULT_DURATION_DAYS)
         activated_at = datetime.now()
-        expires_at = activated_at + timedelta(days=duration_days)
 
         self._data["codes"][found]["used"] = True
         self._data["codes"][found]["used_by"] = user_id
         self._data["codes"][found]["used_at"] = activated_at.isoformat()
 
         user_key = str(user_id)
+        # /redeem 一般会拒绝未过期的用户，但白名单和付费记录不同步时（比如白名单被手动删掉）
+        # 还是会走到这里，同样要叠加剩余天数，不能把剩下的时间清零
+        existing = self._data.get("paid_users", {}).get(user_key)
+        expires_at = _extend_expiry(existing, duration_days, activated_at)
         self._data["paid_users"][user_key] = {
             "activated_at": activated_at.isoformat(),
             "expires_at": expires_at.isoformat(),
@@ -627,8 +758,13 @@ class PaidWhitelist(BaseModule):
         expired = 0
         msg = f"📋 付费用户列表（共 {len(paid_users)} 人）~\n\n"
 
-        for user_key, info in sorted(paid_users.items(), key=lambda x: x[1].get("activated_at", ""), reverse=True):
-            user_id = int(user_key)
+        for user_key, info in sorted(paid_users.items(), key=_activated_sort_key, reverse=True):
+            user_id = _parse_user_id(user_key)
+            if user_id is None:
+                continue
+            # info 在坏数据里可能是 null / 字符串，统一先规整成 dict 再取字段
+            if not isinstance(info, dict):
+                info = {}
             expires_str = info.get("expires_at", "")
             try:
                 expires_at = datetime.fromisoformat(expires_str)
@@ -769,7 +905,7 @@ class PaidWhitelist(BaseModule):
             msg += (
                 f"**{p['name']}**\n"
                 f"  ID：{p['id']}\n"
-                f"  价格：{p.get('price_display', p['price'])}\n"
+                f"  价格：{_price_text(p)}\n"
                 f"  天数：{p['duration_days']} 天\n"
                 f"  描述：{p.get('description', '无')}\n"
                 f"  状态：{status}\n\n"
@@ -827,7 +963,7 @@ class PaidWhitelist(BaseModule):
                 await query.edit_message_text("❌ 这个商品已经下架了哦~ 用 /buy 查看最新商品！")
                 return
 
-            price = prod.get("price_display", f"{prod['price']} 元")
+            price = _price_text(prod)
             name = prod["name"]
             days = prod["duration_days"]
 
@@ -877,6 +1013,15 @@ class PaidWhitelist(BaseModule):
         if not product_id or not user_id or not order_id:
             return web.json_response({"code": 1, "message": "缺少必要参数"}, status=400)
 
+        # user_id 必须能转成数字：以前是先把购买记录写进 JSON、再在
+        # dm.add_user(int(user_id)) 时才炸，结果"钱付了、订单存了、白名单没加上"，
+        # 而且平台只收到 500。现在在写任何数据之前就挡掉。
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            logger.warning(f"⚠️ 回调里的 user_id 不是数字：{user_id!r}，已拒绝")
+            return web.json_response({"code": 1, "message": "user_id 必须是数字"}, status=400)
+
         logger.info(f"📩 收到回调: 商品={product_id}, 用户={user_id}, 订单={order_id}, 状态={status}")
 
         # 只处理成功状态
@@ -910,7 +1055,6 @@ class PaidWhitelist(BaseModule):
         # 生成激活码
         code = _generate_code()
         activated_at = datetime.now()
-        expires_at = activated_at + timedelta(days=duration_days)
 
         # 添加到激活码列表
         if "codes" not in data:
@@ -928,10 +1072,11 @@ class PaidWhitelist(BaseModule):
             "product_id": product_id
         })
 
-        # 记录付费用户
+        # 记录付费用户（续费时在原到期时间上叠加，不能把剩余天数清零~）
         if "paid_users" not in data:
             data["paid_users"] = {}
         user_key = str(user_id)
+        expires_at = _extend_expiry(data["paid_users"].get(user_key), duration_days, activated_at)
         data["paid_users"][user_key] = {
             "activated_at": activated_at.isoformat(),
             "expires_at": expires_at.isoformat(),
@@ -1030,24 +1175,13 @@ class PaidWhitelist(BaseModule):
 
 
 # ===== 启动时自动清理过期用户 =====
-def auto_cleanup():
+def auto_cleanup(module=None):
+    """启动时清理过期付费用户~（传入模块实例就清理它内存里的数据，和 /clean_expired 共用一套逻辑）"""
     try:
         dm = DataManager()
-        data = _load_paid_data()
-        paid_users = data.get("paid_users", {})
-        now = datetime.now()
-        cleaned = 0
-        for user_key, info in paid_users.items():
-            expires_str = info.get("expires_at")
-            if expires_str:
-                try:
-                    expires_at = datetime.fromisoformat(expires_str)
-                    if now > expires_at:
-                        dm.del_user(int(user_key))
-                        cleaned += 1
-                except:
-                    pass
-        if cleaned > 0:
-            logger.info(f"⏰ 启动时自动清理了 {cleaned} 个过期付费用户")
+        data = module._data if module is not None else _load_paid_data()
+        cleaned = _prune_expired_users(data, dm)
+        if cleaned:
+            logger.info(f"⏰ 启动时自动清理了 {len(cleaned)} 个过期付费用户")
     except Exception as e:
         logger.error(f"自动清理过期用户失败: {e}")

@@ -257,8 +257,17 @@ class Admin(BaseModule):
             return
         admins = self.dm.get_admins()
         msg = "👑 管理员列表~\n\n"
+        # 主人 ID 只存在 config 里（DataManager 只给了 is_owner 判断），这里直接读~
+        try:
+            from config import BOT_OWNER_ID
+        except Exception:
+            BOT_OWNER_ID = None
+        if BOT_OWNER_ID is not None:
+            msg += f"⭐ 主人：{BOT_OWNER_ID}\n"
         if admins:
             msg += f"共有 {len(admins)} 位管理员~\n"
+            for admin_id in admins:
+                msg += f"  • {admin_id}\n"
         else:
             msg += "还没有管理员呢~ 用 /add_admin 添加吧！"
         
@@ -404,13 +413,37 @@ class Admin(BaseModule):
         if not self._check_owner(update, context):
             return
         
+        owner_id = update.effective_user.id
+        
+        # 带参数就是"确认"这一步：必须和下发的验证码一致才真的执行。
+        # 之前这里只生成验证码、从不校验（校验只写在 /start <code> 里），
+        # 命令跟自己说的"请输入验证码确认"完全对不上。
+        if context.args:
+            code = context.args[0]
+            expected_owner = _confirm_codes.get(code)
+            if expected_owner is None:
+                await update.message.reply_text("😅 验证码不存在或已经用掉啦~ 重新用 /reset_system 获取一个吧！")
+                return
+            if expected_owner != owner_id:
+                await update.message.reply_text("❌ 验证码错误哦~ 你不是发起这个操作的主人呢！")
+                return
+            self.dm.reset_system()
+            _confirm_codes.pop(code, None)
+            await update.message.reply_text(
+                "🔄 小南已彻底翻新完成！✨\n\n"
+                "所有数据都已清除，小南现在焕然一新啦~\n"
+                "重新开始吧！喵！(｡♥‿♥｡)"
+            )
+            return
+        
         code = _generate_code()
-        _confirm_codes[code] = update.effective_user.id
+        _confirm_codes[code] = owner_id
         
         await update.message.reply_text(
             f"⚠️⚠️⚠️ 彻底翻新警告！\n\n"
             f"此操作会删除所有数据，包括备份！\n"
             f"请输入验证码确认：{code}\n\n"
+            f"确认方式：发送 /reset_system {code}\n"
             f"使用 /clear_confirm_codes 可以取消此操作~"
         )
     
@@ -449,18 +482,28 @@ class Admin(BaseModule):
     # ===== 权限检查 =====
     
     def _check_owner(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        """检查是否是主人~"""
-        user_id = update.effective_user.id
+        """检查是否是主人~
+
+        频道里发命令时 effective_user 为 None，取 .id 会 AttributeError，
+        这里按"没有用户 = 没有权限"处理（返回 False 并静默）。
+        """
+        user = update.effective_user
+        if user is None:
+            return False
+        user_id = user.id
         if not self.dm.is_owner(user_id):
             context.application.create_task(
                 update.message.reply_text("呜… 你不是我的主人，不能使用这个命令哦！(｡•́︿•̀｡)")
             )
             return False
         return True
-    
+
     def _check_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """检查是否是管理员或主人~"""
-        user_id = update.effective_user.id
+        user = update.effective_user
+        if user is None:
+            return False
+        user_id = user.id
         if not (self.dm.is_owner(user_id) or self.dm.is_admin(user_id)):
             context.application.create_task(
                 update.message.reply_text("呜… 你没有权限使用这个命令哦！需要管理员权限呢~ (｡•́︿•̀｡)")
