@@ -243,9 +243,13 @@ class Fun(BaseModule):
         weights = [15, 25, 25, 20, 10, 4, 1]
         
         seed = datetime.now().strftime("%Y%m%d") + str(user.id)
-        random.seed(seed)
-        rank = random.choices(ranks, weights=weights, k=1)[0]
-        random.seed()
+        # 用局部 Random 实例，绝不去碰全局的 random 种子：
+        # 以前这里是 random.seed(seed) / random.seed()，会把**进程级**的随机源重置，
+        # 同进程里 /dice /rps /coin /meme 等命令的 random.choice 序列会被悄悄改掉
+        # （连续两次 /dice，第二次的"随机"其实已经被前一个命令重置过），
+        # 并发/多线程下两个请求还会互相踩种子。局部实例只影响这一次抽签喵~
+        rng = random.Random(seed)
+        rank = rng.choices(ranks, weights=weights, k=1)[0]
         
         descs = {
             "🌟 大吉": [
@@ -327,9 +331,9 @@ class Fun(BaseModule):
         weights = [10, 20, 25, 25, 15, 4, 1]
         
         seed = datetime.now().strftime("%Y%m%d") + str(user.id)
-        random.seed(seed)
-        rank = random.choices(ranks, weights=weights, k=1)[0]
-        random.seed()
+        # 同上：抽签也只动局部 Random，不污染全局随机源喵~
+        rng = random.Random(seed)
+        rank = rng.choices(ranks, weights=weights, k=1)[0]
         
         poems = {
             "🎉 大吉": ["春风得意马蹄疾，一日看尽长安花", "长风破浪会有时，直挂云帆济沧海", "会当凌绝顶，一览众山小"],
@@ -370,6 +374,16 @@ class Fun(BaseModule):
         
         choices = context.args
         chosen = random.choice(choices)
+
+        # 回显用户输入前先截断：/choose 后面可以跟一整篇长文（Telegram 单条上限 4096 字），
+        # 原样拼进回复会超 4096，整条消息被 Telegram 拒掉（BadRequest: Message is too long），
+        # 用户什么都收不到。这里只显示前 40 字，够看清是哪个选项就行喵~
+        def _short(text: str, limit: int = 40) -> str:
+            return text if len(text) <= limit else text[:limit] + "…"
+
+        options_text = "、".join(_short(c) for c in choices)
+        if len(options_text) > 300:
+            options_text = options_text[:300] + "…（还有很多选项，太长啦~）"
         
         reasons = [
             "这个看起来最好吃！", "小南觉得这个最适合你~",
@@ -390,8 +404,8 @@ class Fun(BaseModule):
         
         await update.message.reply_text(
             f"🤔 {random.choice(['让小南想想…', '嗯… 让小南算算…', '小南在思考…', '掐指一算…'])}\n"
-            f"选项：{'、'.join(choices)}\n"
-            f"{random.choice(reactions)} {chosen}\n"
+            f"选项：{options_text}\n"
+            f"{random.choice(reactions)} {_short(chosen, 60)}\n"
             f"理由：{random.choice(reasons)}\n"
             f"{random.choice(['不用谢~', '小南很擅长这个！', '下次纠结还来找小南！', '小南的选择困难症治疗术怎么样？'])}"
         )
@@ -616,7 +630,8 @@ class Fun(BaseModule):
             
             try:
                 r, c = int(context.args[1]), int(context.args[2])
-            except:
+            except (ValueError, TypeError):
+                # 只接数字转换失败，别用裸 except 顺手把 Ctrl+C / SystemExit 也吞掉喵~
                 await update.message.reply_text("😅 格式不对~ 例如：/minesweeper open 1 2")
                 return
             
@@ -969,6 +984,9 @@ class Fun(BaseModule):
             return
         
         question = " ".join(context.args)
+        # 同上：问题原样回显时，长问题会把回复顶过 4096 字上限，整条被 Telegram 拒掉
+        if len(question) > 500:
+            question = question[:500] + "…（问题太长啦，小南只读了前面一部分~）"
         
         answers = [
             "🎯 当然可以！小南觉得没问题~",
@@ -1043,9 +1061,9 @@ class Fun(BaseModule):
         ]
         
         seed = datetime.now().strftime("%Y%m%d") + matched_zodiac
-        random.seed(seed)
-        rank_emoji, rank_name, desc = random.choice(horoscopes)
-        random.seed()
+        # 同上：星座运势也只动局部 Random 喵~
+        rng = random.Random(seed)
+        rank_emoji, rank_name, desc = rng.choice(horoscopes)
         
         await update.message.reply_text(
             f"⭐ {matched_zodiac}今日运势\n"

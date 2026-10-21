@@ -26,9 +26,18 @@ from telegram.ext import (
 from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, BOT_NAME_SHORT
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url
+from .net_helpers import get_proxy_url_async
 
 logger = logging.getLogger(__name__)
+
+# Telegram 单条消息正文上限 4096 字符，超了整条回复都会被拒
+# （BadRequest: Message is too long），用户什么也收不到
+TELEGRAM_MAX_LEN = 4096
+
+# 思考锁的超时（秒）和上限：超时说明执行路径出了意外没走到 finally，
+# 不清理的话这个用户会被永远锁在"正在思考中"
+THINK_LOCK_TIMEOUT = 60
+THINK_LOCK_MAX = 200
 
 # 自动触发关键词
 #
@@ -100,16 +109,32 @@ class Think(BaseModule):
     def _is_thinking(self, user_id: int) -> bool:
         """检查用户是否正在思考中~"""
         if user_id in self._thinking_users:
-            # 检查是否超时（超过60秒自动解锁）
+            # 检查是否超时（超过 THINK_LOCK_TIMEOUT 秒自动解锁）
             elapsed = (datetime.now() - self._thinking_users[user_id]).total_seconds()
-            if elapsed > 60:
+            if elapsed > THINK_LOCK_TIMEOUT:
                 del self._thinking_users[user_id]
                 return False
             return True
         return False
     
+    def _prune_stale_locks(self):
+        """清掉残留的超时锁，并保证这张表不会无限长~
+
+        正常情况下 finally 里的 _unlock_user 一定会执行；但只要有哪条执行路径
+        绕过了它（或任务被强行销毁），残留的 uid 就再也访问不到、永远不会被
+        删掉。这里在加锁前顺手扫一遍。
+        """
+        now = datetime.now()
+        for uid, locked_at in list(self._thinking_users.items()):
+            if (now - locked_at).total_seconds() > THINK_LOCK_TIMEOUT:
+                self._thinking_users.pop(uid, None)
+        while len(self._thinking_users) >= THINK_LOCK_MAX:
+            oldest = min(self._thinking_users, key=lambda u: self._thinking_users[u])
+            self._thinking_users.pop(oldest, None)
+    
     def _lock_user(self, user_id: int):
         """锁定用户，开始思考~"""
+        self._prune_stale_locks()
         self._thinking_users[user_id] = datetime.now()
     
     def _unlock_user(self, user_id: int):
@@ -119,6 +144,10 @@ class Think(BaseModule):
     
     async def think_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/think 命令 - 让小南帮你思考~"""
+        # 频道里发命令时 effective_user / update.message 都是 None，
+        # 后面 _handle_think 取 .id、reply_text 都会 AttributeError
+        if update.effective_user is None or update.message is None:
+            return
         if not context.args:
             await update.message.reply_text(
                 "🧐 想让小南帮你想什么呢~\n\n"
@@ -227,6 +256,12 @@ class Think(BaseModule):
                 return
             
             if response:
+                # 模型最多吐 1000 tokens，但 token 不保证等于字符数：真撞上
+                # 超长回复时 Telegram 会整条拒收（Message is too long），
+                # 用户一个字都看不见，所以先截到安全长度再发
+                if len(response) > TELEGRAM_MAX_LEN - 96:
+                    logger.warning(f"🤔 思考结果 {len(response)} 字，超过 Telegram 上限，已截断")
+                    response = response[:TELEGRAM_MAX_LEN - 96] + "\n\n…（太长啦，后面省略了喵）"
                 await update.message.reply_text(response)
             else:
                 await update.message.reply_text(
@@ -276,8 +311,9 @@ class Think(BaseModule):
                 json=payload,
                 timeout=25,
                 # 和 deepseek_chat 保持一致：走 config 里的代理，
-                # 否则填了 PROXY_URL 的用户这里会连不上
-                proxy=get_proxy_url() or None,
+                # 否则填了 PROXY_URL 的用户这里会连不上。
+                # 用 async 版本，别把事件循环卡在 socket 探测上
+                proxy=await get_proxy_url_async() or None,
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()

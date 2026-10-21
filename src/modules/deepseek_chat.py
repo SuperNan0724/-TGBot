@@ -16,13 +16,45 @@ from config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, MAX_HISTO
 from .base_module import BaseModule
 from .data_manager import DataManager
 from .personalities import PERSONALITIES, PERSONALITY_PROMPTS, PERSONALITY_NAMES, get_prompt
-from .helpers import humanize_reply, send_humanized, get_time_context, get_common_knowledge
-from .net_helpers import get_proxy_url, apply_thinking_options
+from .helpers import (
+    humanize_reply,
+    send_humanized,
+    split_text,
+    get_time_context,
+    get_common_knowledge,
+)
+from .net_helpers import get_proxy_url_async, apply_thinking_options
 
 logger = logging.getLogger(__name__)
 
 # 记忆数据文件
 MEMORY_FILE = "data/memories.json"
+
+# 单条记忆最多留多少字~
+# /remember 后面可以跟一整段（Telegram 单条上限 4096 字），原样存下来的话
+# 50 条记忆能把 memories.json 撑到 200KB，/memories 也会一次拼出上万字、
+# 超过 4096 的 Telegram 单条上限被整条拒掉。记忆本来就是"一句话的事实"，
+# 200 字足够装了~
+MEMORY_MAX_LEN = 200
+
+# 每个用户最多保留多少条记忆
+MEMORY_PER_USER_MAX = 50
+
+# 每次请求最多把多少条记忆塞进系统提示：全塞（50 条）等于每条消息都多烧几千 token
+MEMORY_PROMPT_MAX_ENTRIES = 20
+
+# 历史里最多保留多少**条**消息（一轮对话 = user + assistant 两条）
+#
+# 原来的写法是 len(history) > MAX_HISTORY_LENGTH * 2 然后切 [-(MAX_HISTORY_LENGTH*2):]，
+# 直接用了配置里的原始值，而配置是用户手改的：
+#   * 写成字符串 "10" → "10" * 2 == "1010"，len(...) > "1010" 直接 TypeError，
+#     每条聊天消息都会炸成"好像出了点小问题"
+#   * 写成 0 或负数 → history[-0:] 等于**整段历史**，等于完全不裁剪，越攒越长
+# 这里先安全转成 int 并保证至少留一轮，配置写错也不会让聊天整个不可用喵~
+try:
+    _HISTORY_MAX_ENTRIES = max(2, int(MAX_HISTORY_LENGTH) * 2)
+except (TypeError, ValueError):
+    _HISTORY_MAX_ENTRIES = 20
 
 # ===== 性格系统 =====
 # 从 personalities.py 导入性格数据
@@ -37,49 +69,146 @@ PERSONALITY_LIST = [
     for p in PERSONALITIES
 ]
 
+# id → 性格条目。以前选择回调里用
+# PERSONALITY_LIST[[p['id'] for p in PERSONALITY_LIST].index(role_id)] 取描述，
+# 一旦某个 id 在 PERSONALITY_PROMPTS 里、却不在 PERSONALITY_LIST 里（数据被改/过滤过），
+# .index() 就抛 ValueError，点一下按钮整个回调崩掉（用户那边是"转圈然后没反应"）
+PERSONALITY_BY_ID = {p["id"]: p for p in PERSONALITY_LIST}
+
+
+def _safe_page(value, default: int = 0) -> int:
+    """把 user_data 里拿到的页码安全转成 int~
+
+    context.user_data 里的 role_page 来自内联按钮的历史状态，可能是字符串、
+    None 甚至别的类型；以前直接 get(...) + 1 会 TypeError，点"下一页"就崩。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalized_history(user_data: dict) -> list:
+    """取出对话历史，规整成 API 能吃、写入也安全的形状~
+
+    user_data.json 是外部文件：手改过、老版本写过、或者塞进非 {"role","content"}
+    的条目时，以前 user_data["history"].append(...) 会 AttributeError（"history"
+    不是 list 时），_build_messages 还会把垃圾原样塞给 API。这里统一过滤+裁剪，
+    顺便把裁剪真实写回 user_data（返回的就是裁剪后的 list 本身）。
+    """
+    history = user_data.get("history")
+    if not isinstance(history, list):
+        history = []
+
+    cleaned = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in history
+        if isinstance(msg, dict)
+        and msg.get("role") in ("user", "assistant")
+        and isinstance(msg.get("content"), str)
+    ]
+    if len(cleaned) > _HISTORY_MAX_ENTRIES:
+        cleaned = cleaned[-_HISTORY_MAX_ENTRIES:]
+    user_data["history"] = cleaned
+    return cleaned
+
 
 def _load_memories():
-    """加载所有记忆~"""
+    """加载所有记忆~（顺手把形状不对的条目剔掉）"""
+    data = None
     if os.path.exists(MEMORY_FILE):
         try:
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"读取记忆文件失败，先当作没有记忆喵~: {e}")
+    if not isinstance(data, dict):
+        return {}
+
+    # 手改/写到一半的文件可能是 {"123": "abc"} 或条目里没有 content：
+    # 后面 _get_user_memories 遍历 mem['content'] 就会 KeyError/TypeError，
+    # /memories 和系统提示词会一起炸掉。这里只留下 [{content, time}, ...] 的形状喵~
+    cleaned = {}
+    for user_id, items in data.items():
+        if not isinstance(items, list):
+            continue
+        entries = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("content"), str):
+                continue
+            time_text = item.get("time")
+            entries.append({
+                "content": item["content"],
+                "time": time_text if isinstance(time_text, str) else "未知",
+            })
+        if entries:
+            cleaned[str(user_id)] = entries
+    return cleaned
 
 
-def _save_memories(memories):
-    """保存所有记忆~"""
-    os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(memories, f, ensure_ascii=False, indent=2)
+def _save_memories(memories) -> bool:
+    """保存所有记忆~（写失败只记日志，不让 /remember 直接崩掉）"""
+    try:
+        parent = os.path.dirname(MEMORY_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        # 先写临时文件再原子替换：写到一半崩掉不会把整份记忆毁成半截 JSON
+        tmp_path = f"{MEMORY_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(memories, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, MEMORY_FILE)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"保存记忆失败: {e}")
+        return False
 
 
 def _get_user_memories(user_id: int) -> list:
     """获取用户的记忆列表~"""
     memories = _load_memories()
-    return memories.get(str(user_id), [])
+    entries = memories.get(str(user_id))
+    return entries if isinstance(entries, list) else []
 
 
-def _add_memory(user_id: int, content: str):
-    """添加一条记忆~"""
+def _add_memory(user_id: int, content: str) -> bool:
+    """添加一条记忆~ 返回 True 表示新增，False 表示这句已经记过了（或内容为空）
+
+    两条以前没有的约束：
+    * 去重：同一句话反复出现（自动提取路径每句"我喜欢吃草莓"都会命中一次）
+      以前会一条条往后追加，50 条名额很快被同一句话刷满，
+      系统提示里全是重复内容、白白多烧 token。现在只刷新时间，不再追加。
+    * 长度：单条超过 MEMORY_MAX_LEN 就截断，别让一句话把文件顶到几 KB。
+    """
+    content = (content or "").strip()
+    if not content:
+        return False
+    if len(content) > MEMORY_MAX_LEN:
+        content = content[:MEMORY_MAX_LEN] + "…"
+
     memories = _load_memories()
     user_id_str = str(user_id)
-    
-    if user_id_str not in memories:
-        memories[user_id_str] = []
-    
-    memories[user_id_str].append({
-        "content": content,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M")
-    })
-    
-    # 限制记忆数量，保留最新的50条
-    if len(memories[user_id_str]) > 50:
-        memories[user_id_str] = memories[user_id_str][-50:]
-    
+
+    entries = memories.get(user_id_str)
+    if not isinstance(entries, list):
+        entries = []
+        memories[user_id_str] = entries
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for item in entries:
+        if item.get("content") == content:
+            item["time"] = now_str
+            _save_memories(memories)
+            return False
+
+    entries.append({"content": content, "time": now_str})
+
+    # 限制记忆数量，保留最新的 50 条
+    if len(entries) > MEMORY_PER_USER_MAX:
+        memories[user_id_str] = entries[-MEMORY_PER_USER_MAX:]
+
     _save_memories(memories)
+    return True
 
 
 def _delete_memory(user_id: int, index: int) -> bool:
@@ -200,13 +329,10 @@ class DeepSeekChat(BaseModule):
         per_page = 9  # 每页9个性格（3行x3列）
         total_pages = max(1, (len(PERSONALITY_LIST) + per_page - 1) // per_page)
 
-        # 页码存在 user_data 里，可能是过期内联按钮留下的脏值（-1 / 6 / 99）：
-        # 越界时会渲染出 0 个性格按钮和 "0/6" 这种假页码，所以先夹回合法范围再回写~
-        page = context.user_data.get("role_page", 0)
-        try:
-            page = int(page)
-        except (TypeError, ValueError):
-            page = 0
+        # 页码存在 user_data 里，可能是过期内联按钮留下的脏值（-1 / 6 / 99 / "abc"）：
+        # 越界时会渲染出 0 个性格按钮和 "0/6" 这种假页码，非数字还会 TypeError，
+        # 所以先安全转成 int、再夹回合法范围后回写~
+        page = _safe_page(context.user_data.get("role_page", 0))
         page = max(0, min(page, total_pages - 1))
         context.user_data["role_page"] = page
 
@@ -275,11 +401,14 @@ class DeepSeekChat(BaseModule):
 
         # 翻页操作
         if data == "role_page_next":
-            context.user_data["role_page"] = context.user_data.get("role_page", 0) + 1
+            # 页码可能是字符串/None（内联按钮的旧状态、或者别的代码写进来的脏值），
+            # 直接 +1 会 TypeError：点一下"下一页"回调就崩，用户看到的是转圈没反应。
+            # _safe_page 先安全转 int，再交给 _send_role_page 夹范围喵~
+            context.user_data["role_page"] = _safe_page(context.user_data.get("role_page", 0)) + 1
             await self._send_role_page(query.message, context, user_id, current_role, edit=True)
             return
         elif data == "role_page_prev":
-            context.user_data["role_page"] = context.user_data.get("role_page", 0) - 1
+            context.user_data["role_page"] = _safe_page(context.user_data.get("role_page", 0)) - 1
             await self._send_role_page(query.message, context, user_id, current_role, edit=True)
             return
         elif data == "role_page_info":
@@ -292,14 +421,18 @@ class DeepSeekChat(BaseModule):
             user_data["last_active"] = datetime.now().isoformat()
             self.dm.save_user_data(user_id, user_data)
 
-            new_name = PERSONALITY_NAMES[role_id]
-            p_info = PERSONALITY_LIST[[p['id'] for p in PERSONALITY_LIST].index(role_id)]
+            # 用字典查，不用 list.index()：查不到时 .get() 只是少一行描述，
+            # 而不是 ValueError 把整个回调炸掉（见 PERSONALITY_BY_ID 的注释）
+            new_name = PERSONALITY_NAMES.get(role_id) or PERSONALITY_NAMES.get(
+                DEFAULT_PERSONALITY, "🐱 默认"
+            )
+            p_info = PERSONALITY_BY_ID.get(role_id, {})
 
             await query.edit_message_text(
                 f"🎭 小南的性格已经切换为：\n"
                 f"{new_name}\n\n"
                 f"现在的小南是这样子的~\n"
-                f"{p_info['desc']}\n\n"
+                f"{p_info.get('desc', '小南会努力变成你喜欢的样子哦~')}\n\n"
                 f"来和小南聊天试试吧！(｡♥‿♥｡)"
             )
     
@@ -315,14 +448,38 @@ class DeepSeekChat(BaseModule):
         
         content = " ".join(context.args)
         user_id = update.effective_user.id
-        
-        _add_memory(user_id, content)
-        
+
+        if not content.strip():
+            await update.message.reply_text(
+                "💭 想让小南记住什么呢~\n"
+                "用法：/remember <内容>\n"
+                "例如：/remember 我最喜欢吃草莓蛋糕"
+            )
+            return
+
+        added = _add_memory(user_id, content)
+
+        # 回显用截断后的内容：原文可能接近 4096 字，原样贴回来再加固定文案就超上限了
+        shown = content.strip()
+        too_long = len(shown) > MEMORY_MAX_LEN
+        if too_long:
+            shown = shown[:MEMORY_MAX_LEN] + "…"
+
+        if not added:
+            # 重复记同一句不再追加（以前会一条条往后堆，50 条名额白白占满）
+            await update.message.reply_text(
+                f"💭 这件事小南已经记住啦~ 不用再说一遍喵！\n"
+                f"📝 {shown}\n\n"
+                f"查看记忆：/memories"
+            )
+            return
+
         await update.message.reply_text(
             f"💭 小南记住啦~\n"
-            f"📝 {content}\n"
-            f"小南会一直记得的！(｡♥‿♥｡)\n\n"
-            f"查看记忆：/memories"
+            f"📝 {shown}\n"
+            + (f"（太长啦，小南只记住前面 {MEMORY_MAX_LEN} 字~）\n" if too_long else "")
+            + "小南会一直记得的！(｡♥‿♥｡)\n\n"
+            "查看记忆：/memories"
         )
     
     async def forget_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -367,7 +524,11 @@ class DeepSeekChat(BaseModule):
         msg += "忘记某件事：/forget <编号>\n"
         msg += "清除所有：/clear_memories"
         
-        await update.message.reply_text(msg)
+        # 50 条记忆 + 每条的编号/时间，很容易超过 Telegram 单条 4096 字的上限，
+        # 以前是整段一次性 reply_text，超长时直接 BadRequest: Message is too long，
+        # 主人什么消息都收不到（还以为 /memories 坏了）。这里按换行切成多条发~
+        for chunk in split_text(msg):
+            await update.message.reply_text(chunk)
     
     async def clear_memories_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/clear_memories - 清除所有记忆~"""
@@ -424,11 +585,10 @@ class DeepSeekChat(BaseModule):
         
         question = update.effective_message.text
         
-        # 自动提取记忆
+        # 自动提取记忆（_add_memory 内部去重：同一句反复说不会越攒越多）
         extracted = _extract_memories_from_text(question)
         for memory in extracted:
-            _add_memory(user_id, memory)
-            if extracted:
+            if _add_memory(user_id, memory):
                 logger.info(f"自动记忆: 用户{user_id} - {memory}")
         
         # 如果这句话像是在追问刚发过的那张图，就带着图去问视觉模型，
@@ -528,12 +688,14 @@ class DeepSeekChat(BaseModule):
                 response = humanize_reply(response, style="default")
                 
                 # 保存对话历史（保存处理前的原始回复，避免下次对话历史也断句）
-                user_data["history"].append({"role": "user", "content": question})
-                user_data["history"].append({"role": "assistant", "content": response})
-                
-                # 限制历史长度
-                if len(user_data["history"]) > MAX_HISTORY_LENGTH * 2:
-                    user_data["history"] = user_data["history"][-(MAX_HISTORY_LENGTH * 2):]
+                # 先在规整过的列表上追加，再按 _HISTORY_MAX_ENTRIES 裁剪后写回，
+                # 保证"配置写错/历史被手改"时也不会无限增长、也不会 AttributeError
+                history = _normalized_history(user_data)
+                history.append({"role": "user", "content": question})
+                history.append({"role": "assistant", "content": response})
+                if len(history) > _HISTORY_MAX_ENTRIES:
+                    history = history[-_HISTORY_MAX_ENTRIES:]
+                user_data["history"] = history
                 
                 user_data["last_active"] = datetime.now().isoformat()
                 self.dm.save_user_data(user_id, user_data)
@@ -579,8 +741,13 @@ class DeepSeekChat(BaseModule):
         memory_prompt = ""
         if user_memories:
             memory_prompt = "\n\n以下是你对这个人的记忆（请记住这些信息）：\n"
-            for mem in user_memories:
+            # 记忆最多 50 条，全塞进系统提示等于每条消息都多烧几千 token；
+            # 这里只带最近的 MEMORY_PROMPT_MAX_ENTRIES 条，并说明还有更早的没列出来
+            for mem in user_memories[-MEMORY_PROMPT_MAX_ENTRIES:]:
                 memory_prompt += f"- {mem['content']}\n"
+            hidden = len(user_memories) - MEMORY_PROMPT_MAX_ENTRIES
+            if hidden > 0:
+                memory_prompt += f"（还有 {hidden} 条更早的记忆没列出来）\n"
         
         # 注入全局常识
         common_knowledge = get_common_knowledge()
@@ -599,8 +766,9 @@ class DeepSeekChat(BaseModule):
             {"role": "system", "content": full_system_prompt}
         ]
         
-        # 添加对话历史
-        for msg in user_data.get("history", []):
+        # 添加对话历史（_normalized_history 会顺手把不符合角色/内容格式的条目剔掉，
+        # 否则手改过的 user_data.json 会把垃圾原样发给 API，整次请求 400 失败）
+        for msg in _normalized_history(user_data):
             messages.append(msg)
         
         # 添加当前问题
@@ -626,7 +794,9 @@ class DeepSeekChat(BaseModule):
         
         # aiohttp 默认无视系统代理，必须显式传进去，
         # 否则在需要代理才能上网的环境里这里会直接超时。
-        proxy = get_proxy_url() or None
+        # 用 async 版本：探测代理要建 socket（最长 1.5 秒），同步调用会把
+        # 整个事件循环卡住，所有用户一起等
+        proxy = await get_proxy_url_async() or None
         
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
@@ -638,7 +808,15 @@ class DeepSeekChat(BaseModule):
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
+                    # 返回体结构是外部数据：网关/代理出错时也可能回 200 + 一个
+                    # 没有 choices 的 JSON，直接 data["choices"][0]["message"]["content"]
+                    # 是 KeyError/IndexError，会被外层当成"DeepSeek API 调用失败"。
+                    # 这里自己判一次，日志里能看出到底是"结构不对"还是"网络错"喵~
+                    try:
+                        return data["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError):
+                        logger.error(f"API 返回结构异常，没拿到 choices: {str(data)[:300]}")
+                        return None
                 else:
                     error_text = await resp.text()
                     logger.error(f"API 返回错误: {resp.status} - {error_text}")

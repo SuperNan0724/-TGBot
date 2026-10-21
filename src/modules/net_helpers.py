@@ -18,6 +18,7 @@
 
 `media_parser.py` 和 `deepseek_chat.py` 都从这里取代理设置~
 """
+import asyncio
 import logging
 import os
 import re
@@ -153,6 +154,9 @@ def get_proxy_url(use_cache: bool = True) -> str:
 
     Returns:
         str: 代理地址，没有则返回空字符串
+
+    ⚠️ 在 async 代码里请用 `await get_proxy_url_async()`：
+        本函数重新探测时可能**同步阻塞 1.5 秒**（socket 探测代理端口）。
     """
     global _cached_proxy, _cache_done, _cache_time
 
@@ -177,6 +181,32 @@ def get_proxy_url(use_cache: bool = True) -> str:
     _cache_done = True
     _cache_time = _now()
     return proxy
+
+
+async def get_proxy_url_async(use_cache: bool = True) -> str:
+    """
+    get_proxy_url() 的 async 版本：真要探测时丢进线程，不卡事件循环~
+
+    为什么必须有它？
+    ────────────────
+    detect_system_proxy() 内部会调 is_proxy_alive()，那里有一句
+    `socket.create_connection((host, port), timeout=1.5)`。这是**同步阻塞**
+    调用，而 get_proxy_url() 是在 async handler 里被直接调用的 ——
+    代理端口不通（注册表里有残留配置、代理软件没开）时，每探测一次就把
+    整个事件循环卡最多 1.5 秒。缓存 TTL 到期（90 秒）后这种卡顿会周期性
+    出现，表现是"机器人隔一会儿整条卡一下，所有用户一起等"。
+
+    所以 async 路径统一改成 `await get_proxy_url_async()`：
+      • 缓存命中（绝大多数情况）→ 直接返回，不切线程
+      • 需要重新探测 → asyncio.to_thread，socket 阻塞留在工作线程里
+
+    已经在工作线程里的代码（例如 yt-dlp 的 _run）继续用同步的
+    get_proxy_url() 就行，不必也不该 await。
+    """
+    if use_cache and _cache_done and (_now() - _cache_time) < _CACHE_TTL_SECONDS:
+        return _cached_proxy
+    # use_cache 原样传下去：get_proxy_url 内部还会再做一次缓存判断
+    return await asyncio.to_thread(get_proxy_url, use_cache)
 
 
 def reset_cache():

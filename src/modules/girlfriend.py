@@ -28,6 +28,18 @@ from .helpers import humanize_reply, send_humanized, get_time_context, get_commo
 
 logger = logging.getLogger(__name__)
 
+# 女友模式的对话历史上限（条）：和 deepseek_chat 保持一致，一个用户最多存
+# MAX_HISTORY_LENGTH*2 条（一问一答 = 2 条），这样 config 里的
+# MAX_HISTORY_LENGTH 对两种聊天模式都生效，不会出现「女友模式忘了 5 倍长
+# 的上下文、API 费用也跟着翻倍」的差异。
+# 老版本 config.py 里可能没有这一项，缺省按 README 的默认值 10 处理。
+try:
+    from config import MAX_HISTORY_LENGTH
+except (ImportError, AttributeError):
+    MAX_HISTORY_LENGTH = 10
+
+GF_HISTORY_LIMIT = max(2, int(MAX_HISTORY_LENGTH) * 2)
+
 # ============================================================
 # 💕 女朋友性格定义
 # ============================================================
@@ -250,23 +262,25 @@ class GirlfriendModule(BaseModule):
         await query.answer()
         
         user_id = update.effective_user.id
-        data = query.data
-        
+        data = query.data or ""
+
         if data == "gf_exit":
             user_data = self.dm.get_user_data(user_id)
             if "girlfriend_mode" in user_data:
                 del user_data["girlfriend_mode"]
                 self.dm.save_user_data(user_id, user_data)
+            # 退出就清空这段私聊上下文：别让下次开女友模式时把上次的对话当新女友的记忆
+            self._clear_gf_history(user_id)
             await query.edit_message_text(
                 "💔 已退出女友模式…\n\n"
                 "如果想我了，随时可以用 /girlfriend 找我哦~\n"
                 "我一直在等你呢 (｡•́︿•̀｡)"
             )
             return
-        
+
         if data.startswith("gf_select_"):
             gf_id = data.replace("gf_select_", "")
-            
+
             # 只接受已知的性格 id：来路不明的回调数据存进去，聊天会永久静默
             if gf_id not in GIRLFRIEND_PERSONALITIES:
                 logger.warning(f"⚠️ 收到未知的女友性格回调：{data!r}，已忽略~")
@@ -274,8 +288,11 @@ class GirlfriendModule(BaseModule):
                     "😳 这个女友性格好像不存在了呢~\n发 /girlfriend 重新挑一个吧！"
                 )
                 return
-            
+
             user_data = self.dm.get_user_data(user_id)
+            # 换人设时清掉旧历史：两个女友的回忆不能互相串味（同一个人设重复点就不清）
+            if user_data.get("girlfriend_mode") not in (None, gf_id):
+                self._clear_gf_history(user_id)
             user_data["girlfriend_mode"] = gf_id
             self.dm.save_user_data(user_id, user_data)
             
@@ -368,32 +385,72 @@ class GirlfriendModule(BaseModule):
                     text=msg
                 )
     
+    @staticmethod
+    def _gf_history_path(user_id: int) -> str:
+        """女友历史的落盘路径（和 data/ 目录约定一致，main.py 启动时会 chdir 到 src/）~"""
+        return f"data/gf_history_{int(user_id)}.json"
+
     def _load_gf_history(self, user_id: int) -> list:
-        gf_history_file = f"data/gf_history_{user_id}.json"
-        if os.path.exists(gf_history_file):
-            try:
-                with open(gf_history_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except:
-                pass
-        return []
-    
-    def _save_gf_history(self, user_id: int, history: list):
-        gf_history_file = f"data/gf_history_{user_id}.json"
-        os.makedirs("data", exist_ok=True)
+        """读取女友对话历史~
+
+        以前这里 json.load 拿到什么就用什么：文件被手改成对象（dict）时
+        `history[-20:]` 会 TypeError，整个女友模式的聊天直接报错不回复；
+        文件里有半截内容时 json 解析失败被 `except: pass` 静默吞掉，
+        历史全丢、连日志都没有。现在只认「对象列表」，坏文件记一条日志后
+        当空历史处理（下一次保存会覆盖掉它，不会留档）。
+        """
+        path = self._gf_history_path(user_id)
+        if not os.path.exists(path):
+            return []
         try:
-            with open(gf_history_file, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
         except Exception as e:
-            logger.error(f"保存女友对话历史失败: {e}")
-    
+            logger.error(f"⚠️ 女友历史文件读不出来（{path}）：{e}，本次先当空历史处理~")
+            return []
+
+        if not isinstance(raw, list):
+            logger.warning(f"⚠️ 女友历史文件格式不对（顶层不是列表）：{path}，已忽略~")
+            return []
+
+        history = [
+            item for item in raw
+            if isinstance(item, dict)
+            and item.get("role") in ("user", "assistant", "system")
+            and isinstance(item.get("content"), str)
+        ]
+        # 老版本最多存 50 条，换成本次的配置上限后要顺手收敛，别让旧的长历史继续涨~
+        return history[-GF_HISTORY_LIMIT:]
+
+    def _save_gf_history(self, user_id: int, history: list):
+        """保存女友对话历史~
+
+        写盘前再夹一次长度：调用方万一忘了裁剪，也不会把文件写成无限大；
+        落盘直接复用 DataManager 的原子写（临时文件 + os.replace + Windows
+        上目标被占用时的重试），不再自己抄一套 —— 抄出来的那套没有重试，
+        同一个人连发两条消息时，另一条协程正好在 _load_gf_history 里读这个
+        文件，os.replace 就会 PermissionError，这一轮对话白存（HEAD 时的
+        就地覆盖反而不会失败）。
+        """
+        path = self._gf_history_path(user_id)
+        if not self.dm._save_json(path, history[-GF_HISTORY_LIMIT:]):
+            logger.error(f"保存女友对话历史失败（{path}）~")
+
     def _clear_gf_history(self, user_id: int):
-        gf_history_file = f"data/gf_history_{user_id}.json"
-        if os.path.exists(gf_history_file):
-            try:
-                os.remove(gf_history_file)
-            except:
-                pass
+        """删掉女友历史文件~
+
+        退出/切换女友模式时必须清掉：以前这个函数没有任何调用方（死代码），
+        于是每个开过女友模式的人都在 data/ 里留下一份永远不删的
+        gf_history_<id>.json，历史条数虽然有上限，文件个数却只增不减；
+        切换性格时还会把上一个人设的对话带进新的人设（串味）。
+        """
+        path = self._gf_history_path(user_id)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"🧹 已清理用户 {user_id} 的女友历史~")
+        except OSError as e:
+            logger.warning(f"清理女友历史失败（{path}）：{e}")
     
     async def handle_gf_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理女友模式下的消息"""
@@ -415,42 +472,47 @@ class GirlfriendModule(BaseModule):
             self.dm.save_user_data(user_id, user_data)
         current_gf = fixed_gf
         
-        user_message = update.message.text
-        
+        user_message = update.message.text or ""
+        if not user_message.strip():
+            return
+
         # 人设里的 {name} 是「她自己」的名字（"你是{name}，19岁…"），
         # 必须用机器人名；之前传的是对方 first_name，她会自称成对方的名字。
         gf_prompt = get_gf_prompt(current_gf, BOT_NAME_SHORT)
         if not gf_prompt:
             return
-        
+
         history = self._load_gf_history(user_id)
-        
+
         # 注入当前时间上下文 + 全局常识
         time_context = get_time_context()
         common_knowledge = get_common_knowledge()
         system_content = gf_prompt + "\n\n" + time_context + "\n\n" + common_knowledge
-        
+
+        # 发给 API 的历史也按同一个上限裁：老版本存下来的长历史不会再整段灌进去~
         messages = [{"role": "system", "content": system_content}]
-        for msg in history[-20:]:
+        for msg in history[-GF_HISTORY_LIMIT:]:
             messages.append(msg)
         messages.append({"role": "user", "content": user_message})
-        
+
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            
+
             from .deepseek_chat import DeepSeekChat
             ai_module = DeepSeekChat()
             reply = await ai_module._call_deepseek_api(messages)
-            
+
             if reply:
                 # 使用 humanize_reply 强制断句和去AI化
                 style = "loli_gf" if current_gf == "loli_gf" else "moonlight_gf"
                 reply = humanize_reply(reply, style=style)
-                
+
+                # 以前这里硬编码 50 条，config 里的 MAX_HISTORY_LENGTH 对女友模式完全无效；
+                # 现在统一走 GF_HISTORY_LIMIT，两种聊天模式的历史长度一致~
                 history.append({"role": "user", "content": user_message})
                 history.append({"role": "assistant", "content": reply})
-                if len(history) > 50:
-                    history = history[-50:]
+                if len(history) > GF_HISTORY_LIMIT:
+                    history = history[-GF_HISTORY_LIMIT:]
                 self._save_gf_history(user_id, history)
                 
                 # 模拟真人逐条发送

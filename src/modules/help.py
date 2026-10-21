@@ -16,6 +16,12 @@ COMMANDS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "指令集.txt"
 )
 
+# Telegram 单条消息正文上限 4096 字符，超了会直接 BadRequest: Message is too long，
+# 整条帮助都发不出去。指令集是**可以随时加条目**的，所以必须自己截断。
+TELEGRAM_MAX_LEN = 4096
+# 预留给"还有 N 条没显示"这句提示的空间
+TRUNCATE_HINT_RESERVE = 80
+
 
 def _load_commands() -> dict:
     """从指令集.txt 加载指令列表~"""
@@ -105,6 +111,26 @@ class Help(BaseModule):
             help_text += "\n"
         
         help_text += "💡 有什么问题都可以问我哦~ 喵！(｡♥‿♥｡)"
+        
+        # 指令条目一多就会顶破 4096，这里按"整行"截断，绝不把一条命令从中间劈开
+        if len(help_text) > TELEGRAM_MAX_LEN:
+            lines = help_text.split("\n")
+            kept = []
+            used = 0
+            limit = TELEGRAM_MAX_LEN - TRUNCATE_HINT_RESERVE
+            for idx, line in enumerate(lines):
+                if used + len(line) + 1 > limit:
+                    hidden_cmds = sum(1 for rest in lines[idx:] if rest.startswith("/"))
+                    if hidden_cmds:
+                        kept.append(f"…（还有 {hidden_cmds} 条指令没地方写了喵，指令太多啦~）")
+                    logger.warning(
+                        f"📚 /help 文本 {len(help_text)} 字，超过 {TELEGRAM_MAX_LEN} 上限，"
+                        f"已截断并隐藏 {hidden_cmds} 条指令"
+                    )
+                    break
+                kept.append(line)
+                used += len(line) + 1
+            help_text = "\n".join(kept)
         
         await update.message.reply_text(help_text)
     

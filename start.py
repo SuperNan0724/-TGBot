@@ -147,16 +147,52 @@ def check_config() -> bool:
         print(f"{Colors.RED}❌ 找不到 config.py 配置文件！{Colors.RESET}")
         return False
     
-    with open(config_file, "r", encoding="utf-8") as f:
-        content = f.read()
-    
+    # 读文件：utf-8-sig 顺便吃掉 BOM（记事本选"UTF-8 带 BOM"很常见，
+    # 带 BOM 的源码 Python 能跑，但拿字符串去 compile 会报"非法字符"），
+    # 再退回 GBK（另存为 ANSI 的情况）
+    try:
+        with open(config_file, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        try:
+            with open(config_file, "r", encoding="gbk") as f:
+                content = f.read()
+        except (UnicodeDecodeError, OSError) as e:
+            print(f"{Colors.RED}❌ 读不了 {config_file}：{e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}   建议用记事本/VS Code 以 UTF-8 重新保存一次{Colors.RESET}")
+            return False
+        # 机器人自己是 Python，只认 UTF-8：GBK 的 config.py 会让它一启动就报
+        # "codec can't decode"。与其让用户在编码上耗着，这里直接转码并留备份。
+        backup_path = config_file + ".bak"
+        try:
+            shutil.copy2(config_file, backup_path)
+            with open(config_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+        except OSError as e:
+            print(f"{Colors.RED}❌ config.py 是 GBK 编码，自动转 UTF-8 失败：{e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}   请手动另存为 UTF-8 后再启动{Colors.RESET}")
+            return False
+        print(f"{Colors.GREEN}✅ config.py 是 GBK 编码，已自动转成 UTF-8{Colors.RESET}")
+        print(f"{Colors.CYAN}   原文件备份在：{backup_path}{Colors.RESET}")
+
+    # 语法检查：手写配置错一个引号，机器人的报错会指到 import 行，
+    # 看起来像"代码坏了"。这里先编译一遍，把出错行号直接摆出来
+    try:
+        compile(content, config_file, "exec")
+    except SyntaxError as e:
+        print(f"{Colors.RED}❌ {config_file} 有语法错误，机器人起不来：{Colors.RESET}")
+        print(f"{Colors.YELLOW}   第 {e.lineno} 行：{(e.text or '').strip()}{Colors.RESET}")
+        print(f"{Colors.YELLOW}   {e.msg}{Colors.RESET}")
+        print(f"{Colors.CYAN}💡 常见原因：引号/括号没配对、中文标点（，：“”）写进了字符串外面{Colors.RESET}")
+        return False
+
     if "YOUR_TELEGRAM_BOT_TOKEN" in content:
         print(f"{Colors.YELLOW}⚠️  config.py 还是默认配置哦~{Colors.RESET}")
         print(f"{Colors.YELLOW}   请先编辑 {config_file} 填入你的 Token 和 API Key~{Colors.RESET}")
         print()
         print(f"{Colors.CYAN}💡 也可以运行配置向导来帮你配置~{Colors.RESET}")
         return False
-    
+
     return True
 
 

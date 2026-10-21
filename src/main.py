@@ -46,7 +46,7 @@ def _coerce_env_value(raw: str, current):
     配置文件里全是 Python 字面量（bool / int / tuple），而环境变量天生是字符串。
     直接覆盖会出两种事故：
       • `if DISABLE_THINKING:` 对非空字符串永远为真 → 开关反了
-      • CALLBACK_PORT 变成 "8080"，aiohttp 绑端口时报 TypeError
+      • 整数项变成 "8080" 这样的字符串，后面拿去做运算/绑端口就 TypeError
     所以必须按默认值的类型转换。
     """
     if isinstance(current, bool):
@@ -129,6 +129,31 @@ def _prepare_config():
         if config is None:
             return [], []
         sys.modules["config"] = config
+    except SyntaxError as exc:
+        # config.py 语法错误、或者文件不是 UTF-8，Python 都抛 SyntaxError。
+        # 让它冒出去的话，用户看到的是一段指向 import 的 traceback，
+        # 根本不知道是自己少了个引号 / 用记事本存成了 ANSI。
+        if "codec" in str(exc) or "unicode" in str(exc).lower():
+            hint = "编码不是 UTF-8（用记事本另存成了 ANSI/GBK）"
+        else:
+            hint = "配置里有语法错误"
+        print(
+            f"\n❌ src/config.py 有问题：{hint}\n"
+            f"   位置：第 {exc.lineno} 行  {(exc.text or '').strip()}\n"
+            f"   {exc.msg}\n"
+            "   处理：用 VS Code / 记事本把 config.py「另存为」→ 编码 UTF-8，"
+            "并检查引号、括号是否配对。\n"
+        )
+        raise SystemExit(1)
+    except UnicodeDecodeError:
+        # 用记事本把 config.py 另存成 GBK/ANSI 时就是这条路：
+        # 直接抛出去的话，用户只看到 Python 的编码 traceback，看不出是"保存编码"的问题
+        print(
+            "\n❌ src/config.py 不是 UTF-8 编码，Python 读不了它。\n"
+            "   原因：用记事本/编辑器另存时选了 ANSI/GBK。\n"
+            "   处理：用 VS Code 或记事本「另存为」→ 编码选 UTF-8，再启动一次。\n"
+        )
+        raise SystemExit(1)
 
     added = []
     for name in dir(example):
@@ -257,16 +282,10 @@ class BotApp:
         
         # 注册错误处理器
         self.application.add_error_handler(self.error_handler)
-        
-        # 启动回调服务器（发卡平台对接）
-        self._start_callback_server(loaded_modules)
-    
+
     def _check_optional_config(self):
         """启动期自检：把可选功能的配置缺失一次性说清楚~"""
-        from config import (
-            DEEPSEEK_API_KEY, CALLBACK_SECRET,
-            DISABLE_CALLBACK_SERVER_IF_UNSET, CALLBACK_PORT,
-        )
+        from config import DEEPSEEK_API_KEY
 
         # DeepSeek：缺了不影响启动，但 AI 聊天、/think、女友模式都用不了
         if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "YOUR_DEEPSEEK_API_KEY":
@@ -275,21 +294,6 @@ class BotApp:
                 "   └─ 影响：AI 聊天 / 性格切换 / 思考 / 女友模式 将无法使用\n"
                 "      其它命令（游戏、帮助、系统状态）不受影响~"
             )
-
-        # 回调服务器：密钥是唯一凭据，占位值等于对外开放伪造回调
-        if CALLBACK_SECRET in ("", "CHANGE_ME_TO_A_RANDOM_SECRET"):
-            if DISABLE_CALLBACK_SERVER_IF_UNSET:
-                logger.warning(
-                    f"🔒 发卡平台回调服务器将不会启动（端口 {CALLBACK_PORT}）\n"
-                    "   └─ 原因：CALLBACK_SECRET 还是占位值，用它等于没有防护\n"
-                    "      需要接发卡平台时，请在 config.py 里改成一串随机字符~"
-                )
-            else:
-                logger.warning(
-                    "⚠️ CALLBACK_SECRET 仍是占位值，但回调服务器被强制开启！\n"
-                    "   └─ 风险：任何人都能伪造「支付成功」回调，白拿激活码！\n"
-                    "      请立刻在 config.py 里把它改成一串随机字符！"
-                )
 
     def _write_pid_file(self):
         """把当前 PID 写进 data/bot.pid，方便干净地停止本进程~"""
@@ -313,22 +317,24 @@ class BotApp:
         except Exception:
             pass
 
-    def _start_callback_server(self, loaded_modules: list):
-        """启动发卡平台回调服务器~"""
-        if "paid_whitelist" in loaded_modules:
-            try:
-                paid_module = self.module_loader.get_module("paid_whitelist")
-                if paid_module and hasattr(paid_module, 'start_callback_server'):
-                    paid_module.start_callback_server()
-            except Exception as e:
-                logger.error(f"启动回调服务器失败: {e}")
-        else:
-            logger.info("⏭️ 未加载 paid_whitelist 模块，跳过回调服务器启动")
-    
     def get_help_text(self) -> str:
         """获取帮助文本（供模块调用）"""
         return self.module_loader.get_help_text()
     
+    async def _safe_status_report(self):
+        """在错误处理路径里顺便探一下机器人状态~
+
+        这里本身就在处理错误，如果探测再抛异常（网络断、被限流），
+        PTB 只会多打一条 "Error while handling error"，把真正的错误埋掉，
+        所以异常必须自己吃掉，只留一条 debug 日志。
+        """
+        try:
+            status = await self._check_bot_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"状态检测失败（不影响主流程）: {exc}")
+            return
+        logger.info(f"📊 当前状态检测：{status}")
+
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """全局错误处理器~ 出错了也不怕！"""
         error_msg = str(context.error)
@@ -346,9 +352,7 @@ class BotApp:
             )
             self._kill_stale_bot_processes()
             
-            # 检查当前状态
-            status = await self._check_bot_status()
-            logger.info(f"📊 当前状态检测：{status}")
+            await self._safe_status_report()
             return
         
         # 2. Timed out 错误：连接超时
@@ -360,9 +364,7 @@ class BotApp:
                 "   ├─ 解决：请确保已开启代理软件（Clash/v2ray/SSR 等）\n"
                 "   └─ 状态：机器人会继续尝试重连..."
             )
-            # 检查当前状态
-            status = await self._check_bot_status()
-            logger.info(f"📊 当前状态检测：{status}")
+            await self._safe_status_report()
             return
         
         # 3. NetworkError 错误：网络异常
@@ -374,9 +376,7 @@ class BotApp:
                 "   ├─ 解决：检查网络连接和代理状态\n"
                 "   └─ 状态：机器人会自动重连..."
             )
-            # 检查当前状态
-            status = await self._check_bot_status()
-            logger.info(f"📊 当前状态检测：{status}")
+            await self._safe_status_report()
             return
         
         # 4. RetryAfter 错误：请求频率限制
@@ -388,9 +388,7 @@ class BotApp:
                 "   ├─ 解决：无需操作，Telegram 会自动恢复\n"
                 "   └─ 状态：等待限流解除..."
             )
-            # 检查当前状态
-            status = await self._check_bot_status()
-            logger.info(f"📊 当前状态检测：{status}")
+            await self._safe_status_report()
             return
         
         # 5. 其他未知错误
@@ -406,18 +404,23 @@ class BotApp:
             f"   ├─ 错误信息：{error_msg}\n"
             f"   ├─ 更新 ID：{update.update_id if update else '无'}\n"
             f"   ├─ 用户 ID：{update.effective_user.id if update and update.effective_user else '无'}\n"
-            f"   └─ 已记录到错误日志，可联系开发者查看~"
+            f"   └─ 已记录到错误日志，可联系开发者查看~",
+            # 带上完整堆栈：以前只打一行 str(error)，debug 时根本看不出是哪一行炸的
+            exc_info=context.error,
         )
         
         # 检查当前状态
-        status = await self._check_bot_status()
-        logger.info(f"📊 当前状态检测：{status}")
+        await self._safe_status_report()
         
         if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "呜… 好像出了点小问题呢(｡•́︿•̀｡)\n"
-                "请稍后再试试看吧~ 喵！"
-            )
+            # 网络已经不稳定了，这条"出错了"的提示自己再失败也不该再抛出去
+            try:
+                await update.effective_message.reply_text(
+                    "呜… 好像出了点小问题呢(｡•́︿•̀｡)\n"
+                    "请稍后再试试看吧~ 喵！"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"错误提示没能发出去: {exc}")
     
     async def _check_bot_status(self) -> str:
         """检查机器人当前状态，返回中文状态描述"""

@@ -2,10 +2,14 @@
 # 格式：指令名 - 说明
 # 注意：指令名不带 / 哦~
 # 分类标签用 [分类名] 格式
+#
+# 这个文件就是 /help 的内容来源（src/modules/help.py 直接读它），
+# 改完不用重启也会生效；但条目太多会超过 Telegram 单条 4096 字符上限，
+# help.py 会自动截断并在末尾提示"还有 N 条没显示"。
 
 [基础命令]
 start - 我是混日子的喵～
-role - 切换性格喵～（专属于你的性格喵～）
+role - 切换性格喵～（翻页选，共 50+ 种性格喵～）
 status - 查看状态喵
 clear - 清空我对你的印象喵～
 reset - 完全重置喵～
@@ -16,15 +20,29 @@ remember - 让小南记住一件事喵～
 memories - 查看小南记得的事情喵～
 forget - 让小南忘记一件事喵～
 clear_memories - 清除所有记忆喵～
-girlfriend - 开启女友模式喵～（仅私聊可用，两种性格可选！拥有独立记忆，牢牢记住每句对话！）
+
+[女友模式]
+girlfriend - 开启女友模式喵～（仅私聊可用，两种性格可选，拥有独立记忆）
 gf - 女友模式快捷命令喵～
 
 [娱乐命令]
 dice - 掷骰子喵～
 rps - 猜拳喵～
+coin - 抛硬币喵～
+8ball - 魔法 8 球，问它一个问题喵～
 fortune - 今日运势喵～
+horoscope - 星座运势喵～（例如 /horoscope 双鱼）
 lottery - 抽签喵～
-choose - 选择困难症救星喵～
+choose - 选择困难症救星喵～（/choose 吃火锅 吃烧烤）
+truth_or_dare - 真心话大冒险喵～
+meme - 小南的冷笑话喵～
+compliment - 让小南夸夸你喵～
+insult - 小南的傲娇模式喵～
+
+[小游戏]
+pet - 养一只小南的虚拟宠物喵～（喂食 / 玩耍 / 看状态）
+minesweeper - 扫雷小游戏喵～（/minesweeper new 开局）
+blackjack - 21 点小游戏喵～（/blackjack new 开局）
 
 [媒体解析]
 media - 查看图片/视频解析状态喵～
@@ -35,21 +53,18 @@ media_off - 关闭自动解析图片视频喵～（主人专属喵）
 
 [链接解析]
 link - 解析链接里的图片/视频喵～（也可直接发链接，会自动识别）
+parse - /link 的别名喵～
 link_on - 开启自动链接解析喵～（主人专属喵）
 link_off - 关闭自动链接解析喵～（主人专属喵）
-# 支持 B站/YouTube/抖音/快手/小红书/Twitter/X/微博 等上千个站点
-# 以及 .jpg/.png/.gif/.mp4/.webm 等直链
+# 支持 B站 / YouTube / Twitter(X) / 微博 等上千个站点，以及 .jpg/.png/.gif/.mp4/.webm 直链
+# ⚠️ 抖音 / 快手 / 小红书 目前明确不支持：它们要求请求带 JS 运行时生成的设备指纹，
+#    机器人会直接回复原因，不再白等一轮超时
 # 超过 48MB 的视频不会下载，改为发送原始链接
 
-[付费白名单]
-buy - 查看商品并获取购买方式喵～
-redeem - 兑换激活码加入白名单喵～
-check_expiry - 查看白名单有效期喵～
-
 [贴纸命令]
-add_sticker - 收藏贴纸喵～（主人专属喵）
-sticker_list - 查看收藏的贴纸喵～（主人专属喵）
-del_sticker - 删除收藏的贴纸喵～（主人专属喵）
+add_sticker - 收藏贴纸喵～（主人专属喵；也可以直接发贴纸链接给小南整包导入）
+sticker_list - 查看收藏的贴纸喵～（主人专属喵，翻页显示）
+del_sticker - 删除收藏的贴纸喵～（主人专属喵，带分页选择）
 
 [管理命令]
 add_user - 添加白名单小鱼干喵～（主人专属喵）
@@ -60,7 +75,7 @@ add_group - 添加大鱼干喵～（在群聊中使用自动添加当前群）
 del_group - 移除大鱼干喵～（主人专属喵）
 add_admin - 添加管理员喵～（主人专属喵）
 del_admin - 删除管理员喵～（主人专属喵）
-list_admin - 管理员列表喵～（主人专属喵）
+list_admin - 管理员列表喵～（主人专属喵，会显示 ID）
 error_detail - 错误详细报告喵～
 error_clean - 清除错误报告喵～
 error_export - 导出错误日志喵～
@@ -72,5 +87,5 @@ delete_user_history - 删除特定小鱼干部分说过的话喵～
 system_status - 当前小南身体状态喵～
 reset_logs - 重置小南脑子喵～
 reset_data - 完全重置小南脑子喵～
-reset_system - 让小南彻底翻新喵～
-clear_confirm_codes - 删除验证码喵～
+reset_system - 让小南彻底翻新喵～（会先给一个确认码，再发 /reset_system <确认码> 才执行）
+clear_confirm_codes - 删除未使用的验证码喵～

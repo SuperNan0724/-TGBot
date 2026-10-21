@@ -705,9 +705,73 @@ PERSONALITIES = [
     },
 ]
 
+def _sanitize_personalities(items) -> list:
+    """把性格数据规整一遍~
+
+    为什么要做：deepseek_chat 导入时会直接读 p["id"] / p["emoji"] / p["name"] /
+    p["desc"] / p["prompt"]。以后有人新增性格时漏写一个字段，或者把 id 复制粘贴
+    重了，后果不是"新性格不显示"，而是：
+      * 漏字段 → 整个 deepseek_chat import 直接 KeyError，模块加载器只打一行
+        warning 就跳过，用户那边是"AI 聊天整块消失"；
+      * id 重复 → PERSONALITY_PROMPTS / PERSONALITY_NAMES 后写的悄悄覆盖前面的，
+        按钮菜单里出现两个一样的按钮，选哪个都跳到同一个性格。
+    这里丢掉坏条目、按 id 去重，只记日志，绝不让数据问题拖垮整个模块喵~
+    """
+    if not isinstance(items, (list, tuple)):
+        logger.error("性格数据不是列表，已整体丢弃")
+        return []
+
+    cleaned, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            logger.warning(f"性格数据里混进了非字典条目，已跳过：{type(item).__name__}")
+            continue
+
+        pid = item.get("id")
+        if not isinstance(pid, str) or not pid:
+            logger.warning(f"性格条目缺少有效 id，已跳过：{item.get('name')!r}")
+            continue
+        if pid in seen:
+            logger.warning(f"性格 id 重复：{pid}，后面的重复项已跳过~")
+            continue
+
+        name = item.get("name")
+        prompt = item.get("prompt")
+        if not isinstance(name, str) or not name.strip():
+            logger.warning(f"性格 {pid} 缺少 name，已跳过~")
+            continue
+        if not isinstance(prompt, str) or not prompt.strip():
+            logger.warning(f"性格 {pid} 缺少 prompt，已跳过~")
+            continue
+
+        emoji = item.get("emoji")
+        desc = item.get("desc")
+        cleaned.append({
+            "id": pid,
+            "name": name,
+            "emoji": emoji if isinstance(emoji, str) else "",
+            "desc": desc if isinstance(desc, str) else "",
+            "prompt": prompt,
+        })
+        seen.add(pid)
+
+    if not cleaned:
+        logger.error("性格数据全部无效，性格切换功能会不可用（但不影响其他模块）")
+    return cleaned
+
+
+PERSONALITIES = _sanitize_personalities(PERSONALITIES)
+
 # 构建快速查找字典
 PERSONALITY_PROMPTS = {p["id"]: p["prompt"] for p in PERSONALITIES}
-PERSONALITY_NAMES = {p["id"]: f"{p['emoji']} {p['name']}" for p in PERSONALITIES}
+# emoji 有可能为空（上面兜底成 ""），别拼出" 文学少女"这种前面带空格的怪名字
+PERSONALITY_NAMES = {
+    p["id"]: f"{p['emoji']} {p['name']}".strip() for p in PERSONALITIES
+}
+
+# 万一 default 这条也被过滤掉了，get_prompt 还要有个能用的兜底提示词，
+# 否则 PERSONALITY_PROMPTS["default"] 会 KeyError，每条聊天消息都炸
+_FALLBACK_PROMPT = "你是一只可爱的猫咪，名叫{name}。你说话温柔可爱，喜欢用'喵~'结尾。"
 
 
 def get_prompt(personality_id: str, name: str = "小南") -> str:
@@ -721,8 +785,15 @@ def get_prompt(personality_id: str, name: str = "小南") -> str:
     Returns:
         str: 格式化后的提示词
     """
-    prompt = PERSONALITY_PROMPTS.get(personality_id, PERSONALITY_PROMPTS["default"])
-    return prompt.format(name=name)
+    prompt = (
+        PERSONALITY_PROMPTS.get(personality_id)
+        or PERSONALITY_PROMPTS.get("default")
+        or _FALLBACK_PROMPT
+    )
+    # 用 replace 而不是 str.format：format 会把提示词里任何字面花括号
+    # 当成占位符——以后谁在提示词里写个"{技能}"或者示例代码，每次聊天
+    # 都会 KeyError/ValueError（整个 AI 聊天不可用），而 replace 只认 {name} 喵~
+    return prompt.replace("{name}", str(name))
 
 
 def get_personality_name(personality_id: str) -> str:
@@ -735,7 +806,11 @@ def get_personality_name(personality_id: str) -> str:
     Returns:
         str: 带 emoji 的性格名称
     """
-    return PERSONALITY_NAMES.get(personality_id, PERSONALITY_NAMES["default"])
+    return (
+        PERSONALITY_NAMES.get(personality_id)
+        or PERSONALITY_NAMES.get("default")
+        or "🐱 默认"
+    )
 
 
 class Personalities(BaseModule):

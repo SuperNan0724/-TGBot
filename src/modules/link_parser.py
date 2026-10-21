@@ -46,10 +46,12 @@ from config import (
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url, find_ffmpeg, apply_thinking_options
+from .net_helpers import (
+    get_proxy_url, get_proxy_url_async, find_ffmpeg, apply_thinking_options,
+)
 from . import third_party_parser as third_party
 from .personalities import get_prompt
-from .helpers import get_time_context
+from .helpers import get_time_context, split_text
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,30 @@ def _safe_int(value, default: int) -> int:
 
 
 LINK_DOWNLOAD_TIMEOUT = max(60, _safe_int(LINK_EXTRACT_TIMEOUT, 0) * 4)
+
+# 下载体积上限（字节）~
+# 配置被手改成 0 / 负数 / "48MB" 这类字符串时兜底成 48MB：否则上限 <= 0
+# 会让**所有**下载都被判"超限"，用户看到的现象是"链接解析完全坏了"。
+LINK_DOWNLOAD_CAP_BYTES = max(1, _safe_int(LINK_MAX_DOWNLOAD_MB, 48)) * 1024 * 1024
+
+# Telegram 的 caption 上限是 1024 个字符（按 UTF-16 码元计，emoji 占 2 个）。
+# 超限时 reply_photo 会**整条**抛 BadRequest —— 图带说明一起发不出去，
+# 用户只看到"小南拿不到"，所以发送前必须自己裁。
+CAPTION_LIMIT = 900
+
+# 普通文本上限 4096，这里留点余量给拼接用的换行/后缀
+MESSAGE_LIMIT = 4000
+
+# 历史表（冷却时间戳 / 最近目标）的清理阈值~
+# 这两个 dict 以前只增不减：_last_call 每个用户一条、_last_target 每个群一条，
+# 长期运行 + 有人换号刷就是持续内存增长。1 小时没动静的可以直接丢，
+# 再加一道条数硬上限，防止高频小号把表撑大。
+_HISTORY_TTL_SECONDS = 3600
+_HISTORY_MAX_ENTRIES = 2048
+
+# 单条 URL 的长度上限：URL_PATTERN 会把整行 "https://..." 全部吞进来，
+# 畸形/几 KB 长的链接既发不出去也解析不了，还会被当 key 塞进历史表
+MAX_URL_LENGTH = 2048
 
 # ── 链接匹配 ────────────────────────────────────────────────
 URL_PATTERN = re.compile(
@@ -132,6 +158,100 @@ def _human_duration(seconds) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def _clip(text: str, limit: int = CAPTION_LIMIT, suffix: str = "…") -> str:
+    """
+    把文本裁进 Telegram 的硬上限~
+
+    为什么不直接 `text[:limit]`？
+      Telegram 按 **UTF-16 码元** 计数：中文占 1 个、emoji 占 2 个。
+      标题里一堆 emoji 时 `text[:1024]` 实际是 2048 个码元，照样超限；
+      而 caption 一超限，reply_photo 会整个抛 BadRequest（图片也不发出去），
+      调用方只能看到"发送失败"。
+    """
+    if not text:
+        return text
+    if len(text.encode("utf-16-le")) // 2 <= limit:
+        return text
+    text = text[:limit]        # 先按字符粗裁，保证最多 2*limit 个码元
+    while text and len(text.encode("utf-16-le")) // 2 + len(suffix) > limit:
+        text = text[:-1]
+    return (text + suffix) if text else suffix
+
+
+def _prune_history(mapping: dict, now: float = None) -> None:
+    """
+    把过期 / 超量的条目**真的从字典里删掉**~
+
+    这些表以前只增不减（只判断时间差、不做删除），条目数跟着用户数/群数
+    一路涨。这里在每次写入前扫一遍：先按 TTL 删，再按条数上限删最旧的。
+    """
+    if not mapping:
+        return
+    now = time.time() if now is None else now
+
+    def _stamp(value) -> float:
+        # _last_call 存的是时间戳；_last_target 存的是 (url, 时间戳)
+        return value[1] if isinstance(value, tuple) else value
+
+    for key in [k for k, v in list(mapping.items()) if now - _stamp(v) > _HISTORY_TTL_SECONDS]:
+        mapping.pop(key, None)
+    while len(mapping) > _HISTORY_MAX_ENTRIES:
+        oldest = min(mapping, key=lambda k: _stamp(mapping[k]))
+        mapping.pop(oldest, None)
+
+
+def _read_bytes(path: str) -> bytes:
+    """在线程里读文件~（几十 MB 的同步 read 会卡住事件循环）"""
+    with open(path, "rb") as f:
+        return f.read()
+
+
+# 超时的下载线程最多等这么久再强删目录（秒）~ 正常情况下线程会先自己结束
+ORPHAN_CLEANUP_TIMEOUT = 600
+
+# 还没清完的后台任务：留着强引用，免得任务被 GC 掉导致目录永远没人删
+_ORPHAN_TASKS = set()
+
+
+def _schedule_orphan_cleanup(tmpdir: str, worker) -> None:
+    """
+    等后台下载线程结束后再删临时目录~
+
+    为什么不能马上删？
+      asyncio.to_thread 起的线程是**杀不掉**的。handler 超时返回后，yt-dlp
+      还在往 tmpdir 里写文件；这时候 rmtree 会一边删一边被写，结果是
+      删不干净（Windows 上还会抛 WinError），甚至让线程抛一个谁也没接的
+      异常（日志里那句 "Task exception was never retrieved"）。
+
+    所以：挂一个后台任务，等 worker 真正结束（最多 ORPHAN_CLEANUP_TIMEOUT）
+    再 rm -rf。顺便把 worker 的异常取走，日志里不再出现"没人接的异常"。
+    """
+    async def _waiter():
+        try:
+            await asyncio.wait_for(worker, timeout=ORPHAN_CLEANUP_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"下载线程 {ORPHAN_CLEANUP_TIMEOUT} 秒后仍未结束，强制清理临时目录")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 线程自己的异常在这里被消费掉（下载已经判超时，没人再要这个异常）
+            pass
+        finally:
+            try:
+                await asyncio.to_thread(shutil.rmtree, tmpdir, ignore_errors=True)
+            except Exception as e:
+                logger.debug(f"清理临时目录失败（不影响结果）: {e}")
+
+    try:
+        task = asyncio.ensure_future(_waiter())
+    except RuntimeError:
+        # 没有运行中的事件循环（理论上不会发生）：退化成同步删除
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return
+    _ORPHAN_TASKS.add(task)
+    task.add_done_callback(_ORPHAN_TASKS.discard)
 
 
 def detect_platform(url: str) -> str:
@@ -433,7 +553,7 @@ class LinkParser(BaseModule):
 
         logger.info(
             f"🔗 链接解析模块初始化（AI简介: {'开' if LINK_AI_SUMMARY else '关'}, "
-            f"下载上限: {LINK_MAX_DOWNLOAD_MB}MB）"
+            f"下载上限: {_human_size(LINK_DOWNLOAD_CAP_BYTES)}）"
         )
 
     # ──────────────────────────────────────────
@@ -499,13 +619,16 @@ class LinkParser(BaseModule):
         logger.info(f"🔗 [link_parser] 识别到目标: {urls}")
 
         # 记住这个目标，方便用户之后说「解析刚才那个」
-        self._last_target[message.chat_id] = urls[0]
+        # 存 (url, 时间戳)：时间戳用于过期清理，也用于判断"刚才"到底多近
+        _prune_history(self._last_target)
+        self._last_target[message.chat_id] = (urls[0], time.time())
 
         left = self._cooldown_left(user.id)
         if left:
             await message.reply_text(f"慢一点嘛~ 还要等 {left} 秒才能再看一个链接哦(｡•́︿•̀｡)")
             return
 
+        _prune_history(self._last_call)
         self._last_call[user.id] = time.time()
 
         if recovered_label:
@@ -537,8 +660,15 @@ class LinkParser(BaseModule):
             # raise ApplicationHandlerStop 就不会执行，PTB 只会把异常交给
             # 错误处理器，然后**继续**把同一条消息派给 group 0 的
             # deepseek_chat —— 用户会收到两条互不相干的回复。
+            #
+            # 另外：多条说明拼起来可能超过 4096，直接 edit_text 会被 API
+            # 以 "Message is too long" 拒收（用户什么也看不到），所以按
+            # helpers.split_text 切成几条发。
+            pieces = split_text("\n\n".join(notes), MESSAGE_LIMIT)
             try:
-                await status.edit_text("\n\n".join(notes))
+                await status.edit_text(pieces[0])
+                for piece in pieces[1:4]:
+                    await message.reply_text(piece)
             except Exception as e:
                 logger.debug(f"更新状态消息失败（用户可能删了消息）: {e}")
         else:
@@ -561,6 +691,10 @@ class LinkParser(BaseModule):
         found = []
         for raw in URL_PATTERN.findall(text or ""):
             url = raw.rstrip(".,;:!?、。，；：！？")
+            if len(url) > MAX_URL_LENGTH:
+                # 超长/畸形链接：请求发不出去，还会被当作 key 长期占内存
+                logger.info(f"⏭️ 跳过超长链接（{len(url)} 字符）")
+                continue
             low = url.lower()
             if any(low.endswith(ext) for ext in SKIP_EXTENSIONS):
                 continue
@@ -631,7 +765,7 @@ class LinkParser(BaseModule):
 
     async def _handle_direct(self, url, user_id, message, platform, ext) -> str:
         """直链媒体：直接下载后发送~"""
-        data, content_type, err = await self._http_get(url, max_bytes=LINK_MAX_DOWNLOAD_MB * 1024 * 1024)
+        data, content_type, err = await self._http_get(url, max_bytes=LINK_DOWNLOAD_CAP_BYTES)
         if data is None:
             return f"❌ 这个链接小南拿不到呢（{err}）\n{url}"
 
@@ -711,10 +845,10 @@ class LinkParser(BaseModule):
         # 视频
         if result.get("video_url"):
             data, ctype, err = await self._http_get(
-                result["video_url"], max_bytes=LINK_MAX_DOWNLOAD_MB * 1024 * 1024
+                result["video_url"], max_bytes=LINK_DOWNLOAD_CAP_BYTES
             )
             if data:
-                media_sent = await self._send_video(message, data, meta_text[:1000],
+                media_sent = await self._send_video(message, data, _clip(meta_text),
                                                     url, buttons)
                 if not media_sent:
                     self._last_reason = "视频下载到了但发送失败（可能超过 Telegram 上限）"
@@ -730,7 +864,7 @@ class LinkParser(BaseModule):
                 if not data:
                     continue
                 if idx == 0:
-                    await self._send_photo(message, data, meta_text[:1000], url, buttons)
+                    await self._send_photo(message, data, _clip(meta_text), url, buttons)
                 else:
                     await self._send_photo(message, data, "", url)
                 sent += 1
@@ -739,7 +873,7 @@ class LinkParser(BaseModule):
                 self._last_reason = "图集图片都没能下载下来"
 
         if not media_sent:
-            await message.reply_text(meta_text, reply_markup=buttons,
+            await message.reply_text(_clip(meta_text, MESSAGE_LIMIT), reply_markup=buttons,
                                      disable_web_page_preview=True)
             if self._last_reason:
                 await message.reply_text(f"⚠️ 媒体没能拿到：{self._last_reason}")
@@ -788,7 +922,8 @@ class LinkParser(BaseModule):
         if title:
             meta_lines.append(f"📌 {title[:120]}")
         if uploader:
-            meta_lines.append(f"👤 {uploader}")
+            # 作者名也是网页可控的，长到几 KB 会把整条消息顶过 4096
+            meta_lines.append(f"👤 {uploader[:80]}")
         stats = []
         if view_count:
             stats.append(f"播放 {view_count:,}")
@@ -811,19 +946,23 @@ class LinkParser(BaseModule):
         downloaded_bytes = None
 
         if is_image and info.get("url"):
-            data, ctype, err = await self._http_get(info["url"])
+            data, ctype, err = await self._http_get(
+                info["url"], max_bytes=LINK_DOWNLOAD_CAP_BYTES
+            )
             if data:
-                await self._send_photo(message, data, meta_text[:1000], webpage, buttons)
+                await self._send_photo(message, data, _clip(meta_text), webpage, buttons)
                 media_sent = True
                 downloaded_bytes = data
+            else:
+                self._last_reason = f"图片直链下载失败（{err}）"
         else:
             download = await self._download_media(url, info)
             if download:
                 path, size = download
                 try:
-                    with open(path, "rb") as f:
-                        data = f.read()
-                    ok = await self._send_video(message, data, meta_text[:1000], webpage, buttons)
+                    # 读文件必须丢到线程里：几十 MB 的同步 read 会卡住事件循环
+                    data = await asyncio.to_thread(_read_bytes, path)
+                    ok = await self._send_video(message, data, _clip(meta_text), webpage, buttons)
                     media_sent = ok
                 finally:
                     try:
@@ -835,24 +974,38 @@ class LinkParser(BaseModule):
 
         if not media_sent:
             # 下载不了或超限：发纯文字卡片 + 链接按钮
-            await message.reply_text(meta_text, reply_markup=buttons, disable_web_page_preview=True)
+            await message.reply_text(_clip(meta_text, MESSAGE_LIMIT), reply_markup=buttons,
+                                     disable_web_page_preview=True)
 
             # 说明为什么没给文件——否则用户会以为功能坏了。
             # 注意这里的嵌套层级：早先写成 elif 挂在"体积超限"分支下面，
             # 结果下载失败时根本走不到，提示永远不显示。
-            if not is_image:
-                size_hint = info.get("filesize") or info.get("filesize_approx")
-                if size_hint and size_hint > LINK_MAX_DOWNLOAD_MB * 1024 * 1024:
+            size_hint = info.get("filesize") or info.get("filesize_approx")
+            if is_image:
+                # 图片型结果（extractor 报 ext=jpg 之类）却没能发出图：
+                # 以前这里被 `if not is_image` 挡掉，用户只收到一张没有图的
+                # 卡片，完全看不出"为什么没图"。两种原因要分别说清楚。
+                if not info.get("url"):
                     await message.reply_text(
-                        f"📦 这个视频有 {_human_size(size_hint)}，超过小南的搬运上限"
-                        f"（{LINK_MAX_DOWNLOAD_MB}MB），所以只能给你链接啦~"
+                        "🖼️ 这个链接的内容是图片，但提取器没给出图片直链"
+                        "（多半需要登录态，或直链签名已过期），只能给你原链接啦~"
                     )
-                elif self._last_reason:
+                else:
                     await message.reply_text(
-                        f"⚠️ 视频文件没能下载下来：{self._last_reason}\n"
-                        "   ├─ 上面已经给出封面和简介\n"
+                        f"⚠️ 图片没能下载下来：{self._last_reason or '直链请求失败'}\n"
                         "   └─ 可以点按钮直接打开原链接看"
                     )
+            elif isinstance(size_hint, (int, float)) and size_hint > LINK_DOWNLOAD_CAP_BYTES:
+                await message.reply_text(
+                    f"📦 这个视频有 {_human_size(size_hint)}，超过小南的搬运上限"
+                    f"（{_human_size(LINK_DOWNLOAD_CAP_BYTES)}），所以只能给你链接啦~"
+                )
+            elif self._last_reason:
+                await message.reply_text(
+                    f"⚠️ 视频文件没能下载下来：{self._last_reason}\n"
+                    "   ├─ 上面已经给出封面和简介\n"
+                    "   └─ 可以点按钮直接打开原链接看"
+                )
 
         # ── AI 简介（第二条消息）──
         if LINK_AI_SUMMARY and DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "YOUR_DEEPSEEK_API_KEY":
@@ -880,11 +1033,11 @@ class LinkParser(BaseModule):
         Returns:
             (path, size) 或 None
         """
-        cap_bytes = LINK_MAX_DOWNLOAD_MB * 1024 * 1024
+        cap_bytes = LINK_DOWNLOAD_CAP_BYTES
 
         # 已知体积且超限，直接放弃，不浪费带宽
         known = info.get("filesize") or info.get("filesize_approx")
-        if known and known > cap_bytes:
+        if isinstance(known, (int, float)) and known > cap_bytes:
             logger.info(f"⏭️ 体积 {_human_size(known)} 超过上限，跳过下载")
             return None
 
@@ -951,16 +1104,19 @@ class LinkParser(BaseModule):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
+        # worker 要在外面拿着：超时后线程还在跑，得等它真的结束才能删目录
+        worker = asyncio.ensure_future(asyncio.to_thread(_run))
         try:
             # 必须用 wait_for 加个上限：yt-dlp 卡住时 to_thread 会一直挂着，
             # handler 就永远返回不了，用户连报错都看不到。
-            await asyncio.wait_for(
-                asyncio.to_thread(_run), timeout=LINK_DOWNLOAD_TIMEOUT
-            )
+            # shield：超时只放弃"等"，不要去取消 worker（取消了就看不到它何时
+            # 真正结束，也就没法在安全的时机删临时目录）。
+            await asyncio.wait_for(asyncio.shield(worker), timeout=LINK_DOWNLOAD_TIMEOUT)
         except asyncio.TimeoutError:
             # ⚠️ wait_for 只是让 handler 不再等，**线程本身杀不掉** ——
             # asyncio.to_thread 里的 yt-dlp 还在后台跑，可能继续往 tmpdir 写文件。
-            # 所以这里只能：先删目录让它写失败、自然结束，然后照常报超时。
+            # 所以这里**不能**立刻 rmtree（那会和写入方抢文件，删一半留一半），
+            # 改成：登记一个后台清理任务，等线程结束（或 10 分钟兜底）再删。
             logger.warning(
                 f"yt-dlp 下载超时（{LINK_DOWNLOAD_TIMEOUT} 秒）: {url} "
                 "— 线程仍在后台运行，无法取消"
@@ -969,7 +1125,7 @@ class LinkParser(BaseModule):
                 f"下载超时（{LINK_DOWNLOAD_TIMEOUT} 秒内没下完），"
                 "可能是站点太慢或文件太大"
             )
-            _cleanup()
+            _schedule_orphan_cleanup(tmpdir, worker)
             return None
         except Exception as e:
             err = str(e)
@@ -1009,12 +1165,9 @@ class LinkParser(BaseModule):
             path = files[0]
             size = os.path.getsize(path)
             if size == 0 or size > cap_bytes:
-                for f in files:
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
-                os.rmdir(tmpdir)
+                # 用 _cleanup() 而不是逐个 remove + rmdir：
+                # rmdir 遇到非空目录（yt-dlp 可能留下 .part 子目录）会抛异常
+                _cleanup()
                 return None
             return path, size
         except Exception as e:
@@ -1121,11 +1274,12 @@ class LinkParser(BaseModule):
         if image and image.startswith("http"):
             data, ctype, _ = await self._http_get(image, max_bytes=8 * 1024 * 1024)
             if data and (ctype or "").startswith("image/"):
-                await self._send_photo(message, data, text[:1000], url, buttons)
+                await self._send_photo(message, data, _clip(text), url, buttons)
                 sent_photo = True
 
         if not sent_photo:
-            await message.reply_text(text, reply_markup=buttons, disable_web_page_preview=False)
+            await message.reply_text(_clip(text, MESSAGE_LIMIT), reply_markup=buttons,
+                                     disable_web_page_preview=False)
 
         if LINK_AI_SUMMARY and desc:
             try:
@@ -1181,7 +1335,9 @@ class LinkParser(BaseModule):
         if _is_private_host(url):
             return None, None, "内网地址不允许访问"
 
-        proxy = get_proxy_url() or None
+        # 必须用 async 版本：get_proxy_url() 重新探测时会同步阻塞 1.5 秒
+        # （socket 探代理端口），在 handler 里直接调会把整个事件循环卡住
+        proxy = await get_proxy_url_async() or None
         timeout = aiohttp.ClientTimeout(total=120, connect=30)
         headers = {
             "User-Agent": (
@@ -1284,8 +1440,10 @@ class LinkParser(BaseModule):
         user_data = self.dm.get_user_data(user_id)
         personality = user_data.get("personality", DEFAULT_PERSONALITY)
 
-        title = info.get("title") or ""
-        uploader = info.get("uploader") or info.get("channel") or ""
+        # 标题/作者来自网页，长度可控；这里先裁一下，
+        # 免得几 KB 的标题把提示词和请求体一起撑大
+        title = (info.get("title") or "")[:200]
+        uploader = (info.get("uploader") or info.get("channel") or "")[:100]
         duration = _human_duration(info.get("duration"))
         description = (info.get("description") or "")[:800]
         platform = detect_platform(info.get("webpage_url") or "")
@@ -1341,7 +1499,7 @@ class LinkParser(BaseModule):
             "Authorization": f"Bearer {_KEY}",
             "Content-Type": "application/json",
         }
-        proxy = get_proxy_url() or None
+        proxy = await get_proxy_url_async() or None
         timeout = aiohttp.ClientTimeout(total=120, connect=30)
 
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
@@ -1418,7 +1576,10 @@ class LinkParser(BaseModule):
 
         # 用法4：什么都没带，用最近提到过的那个
         if not url:
-            url = self._last_target.get(message.chat_id)
+            # 存的是 (url, 时间戳)：超过 TTL 的"刚才那个"已经不算刚才了
+            entry = self._last_target.get(message.chat_id)
+            if isinstance(entry, tuple) and time.time() - entry[1] <= _HISTORY_TTL_SECONDS:
+                url = entry[0]
 
         if not url:
             await message.reply_text(
@@ -1435,7 +1596,7 @@ class LinkParser(BaseModule):
         try:
             note = await self._process_url(url, user.id, message)
             if note:
-                await status.edit_text(note)
+                await status.edit_text(_clip(note, MESSAGE_LIMIT))
             else:
                 try:
                     await status.delete()

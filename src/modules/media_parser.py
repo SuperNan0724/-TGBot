@@ -33,7 +33,9 @@ from config import (
 )
 from .base_module import BaseModule
 from .data_manager import DataManager
-from .net_helpers import get_proxy_url, find_ffmpeg, has_ffmpeg, apply_thinking_options
+from .net_helpers import (
+    get_proxy_url_async, find_ffmpeg, has_ffmpeg, apply_thinking_options,
+)
 from .personalities import get_prompt
 from .helpers import get_time_context, get_common_knowledge
 
@@ -54,6 +56,20 @@ VIDEO_FRAME_SAMPLE_SECONDS = 2  # 每多少秒取一帧（上限内）
 
 # 每用户调用间隔，防止有人连发图片刷爆额度
 DEFAULT_COOLDOWN_SECONDS = 15
+
+# settings.json 是给人手改的，max_frames 可能被写成 100000：
+# 每帧都是一张 JPEG 落盘，不封顶能直接把磁盘写满，所以加一道硬上限
+MAX_FRAMES_HARD_LIMIT = 12
+
+# 图片上下文缓存的总量上限~
+# MEDIA_CONTEXT_MAX_BYTES 只限制"单张"，100 个用户各存一张 5MB 就是 500MB。
+# 所以再加条数和总字节两道闸，超了就丢最旧的。
+MEDIA_CONTEXT_MAX_ENTRIES = 32
+MEDIA_CONTEXT_TOTAL_BYTES = 24 * 1024 * 1024
+
+# 调用时间戳表（self._last_call）的清理阈值：只加不减 = 长期运行内存泄漏
+_CALL_LOG_TTL_SECONDS = 3600
+_CALL_LOG_MAX_ENTRIES = 2048
 
 
 def _human_size(num_bytes: int) -> str:
@@ -89,6 +105,24 @@ def _safe_int(value, default: int) -> int:
         return default
 
 
+def _prune_timestamps(mapping: dict, ttl: float = _CALL_LOG_TTL_SECONDS,
+                      max_entries: int = _CALL_LOG_MAX_ENTRIES) -> None:
+    """
+    把过期 / 超量的时间戳条目**真的从字典里删掉**~
+
+    以前 self._last_call 只写入不删除：每个用过的用户留一条，长期运行就是
+    持续内存增长。这里在写入前扫一遍，先按 TTL 删，再按条数上限删最旧的。
+    """
+    if not mapping:
+        return
+    now = time.time()
+    for key in [k for k, ts in list(mapping.items()) if now - ts > ttl]:
+        mapping.pop(key, None)
+    while len(mapping) > max_entries:
+        oldest = min(mapping, key=mapping.get)
+        mapping.pop(oldest, None)
+
+
 def _has_ffmpeg() -> bool:
     """
     检查 ffmpeg 是否可用~
@@ -98,6 +132,12 @@ def _has_ffmpeg() -> bool:
     进程继承的 PATH 里没有它，shutil.which 会误判为"没装"。
     """
     return has_ffmpeg()
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    """在线程里写文件~（Telegram 允许 20MB 视频，同步写会卡住事件循环）"""
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 def _guess_format(data: bytes) -> str:
@@ -207,15 +247,20 @@ class MediaParser(BaseModule):
         try:
             if not data:
                 return
-            if len(data) > MEDIA_CONTEXT_MAX_BYTES:
+            # 配置可能被手改成字符串/None，比较前先归一成整数
+            max_bytes = _safe_int(MEDIA_CONTEXT_MAX_BYTES, 5 * 1024 * 1024)
+            if len(data) > max_bytes:
                 logger.info(
                     f"图片 {_human_size(len(data))} 超过追问缓存上限"
-                    f"（{_human_size(MEDIA_CONTEXT_MAX_BYTES)}），不缓存"
+                    f"（{_human_size(max_bytes)}），不缓存"
                 )
                 return
             if not _guess_format(data):
                 # 不是受支持的图片格式（比如视频首帧以外的数据），不缓存
                 return
+            # 写入前先清理：过期的、超出条数/总字节的条目要从内存里真删掉，
+            # 只靠"取的时候判断过期"永远删不掉那些不再追问的旧图
+            self._prune_image_context()
             self._image_context[user_id] = {
                 "data": data,
                 "desc": desc or "",
@@ -223,6 +268,42 @@ class MediaParser(BaseModule):
             }
         except Exception as e:
             logger.debug(f"缓存图片上下文失败: {e}")
+
+    def _prune_image_context(self) -> None:
+        """
+        把过期 / 超量的图片上下文**真的从内存里删掉**~
+
+        为什么不能只靠"取的时候判断过期"？
+        ────────────────────────────────
+        get_image_context() 只有在**那个用户又来追问**时才会 pop。
+        用户发完图、不问就走，那条记录（单张最多 5MB）就一直躺在 dict 里，
+        永远不会被释放 —— 这就是"TTL 到了但内存没降"的原因。
+
+        所以每次写入前统一扫一遍：
+          1. 按 MEDIA_CONTEXT_TTL 删过期条目
+          2. 超条数上限 → 丢最旧的
+          3. 超总字节上限 → 继续丢最旧的
+        """
+        if not self._image_context:
+            return
+
+        now = time.time()
+        ttl = _safe_int(MEDIA_CONTEXT_TTL, 600)
+        for uid in [u for u, item in list(self._image_context.items())
+                    if now - (item.get("ts") or 0) > ttl]:
+            self._image_context.pop(uid, None)
+
+        def _oldest() -> int:
+            return min(self._image_context,
+                       key=lambda u: self._image_context[u].get("ts") or 0)
+
+        while len(self._image_context) > MEDIA_CONTEXT_MAX_ENTRIES:
+            self._image_context.pop(_oldest(), None)
+
+        total = sum(len(item.get("data") or b"") for item in self._image_context.values())
+        while total > MEDIA_CONTEXT_TOTAL_BYTES and self._image_context:
+            dropped = self._image_context.pop(_oldest(), None) or {}
+            total -= len(dropped.get("data") or b"")
 
     def get_image_context(self, user_id: int):
         """
@@ -234,7 +315,7 @@ class MediaParser(BaseModule):
         item = self._image_context.get(user_id)
         if not item:
             return None
-        if time.time() - item.get("ts", 0) > MEDIA_CONTEXT_TTL:
+        if time.time() - item.get("ts", 0) > _safe_int(MEDIA_CONTEXT_TTL, 600):
             self._image_context.pop(user_id, None)
             return None
         return item
@@ -337,6 +418,7 @@ class MediaParser(BaseModule):
             return
 
         status = await message.reply_text("👀 小南正在看…")
+        _prune_timestamps(self._last_call)
         self._last_call[user.id] = time.time()
 
         try:
@@ -470,17 +552,21 @@ class MediaParser(BaseModule):
         proc = None             # 超时要靠它把 ffmpeg 杀掉，见下面的 except
         try:
             video_path = os.path.join(tmpdir, "input.mp4")
-            with open(video_path, "wb") as f:
-                f.write(video_bytes)
+            # 写文件丢线程：Telegram 允许 20MB 的视频，同步 write 会卡住事件循环
+            await asyncio.to_thread(_write_bytes, video_path, video_bytes)
 
             # 先取时长，决定抽帧间隔
             duration = await self._probe_duration(video_path)
             # max_frames 可能被手改成 0 或负数（settings.json），
             # duration / 0 会 ZeroDivisionError，负数会让 ffmpeg 参数非法
             frames_per_video = max_frames if max_frames > 0 else DEFAULT_MAX_FRAMES
+            # 再封一道硬上限：settings.json 写成 100000 会把磁盘写满
+            frames_per_video = min(frames_per_video, MAX_FRAMES_HARD_LIMIT)
             if duration and duration > 0:
                 interval = max(1.0, duration / frames_per_video)
             else:
+                # ffprobe 取不到时长（格式怪异/被截断）：退回固定间隔，
+                # 不因为"解析失败"就整个放弃
                 interval = VIDEO_FRAME_SAMPLE_SECONDS
 
             out_pattern = os.path.join(tmpdir, "frame_%02d.jpg")
@@ -488,7 +574,7 @@ class MediaParser(BaseModule):
             # 机器人可能是在装 ffmpeg 之前启动的终端里跑的，PATH 里没有它
             ffmpeg_exe = find_ffmpeg() or "ffmpeg"
             cmd = [
-                ffmpeg_exe, "-hide_banner", "-loglevel", "error",
+                ffmpeg_exe, "-hide_banner", "-nostdin", "-loglevel", "error",
                 "-i", video_path,
                 "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2",
                 "-frames:v", str(frames_per_video),
@@ -621,7 +707,8 @@ class MediaParser(BaseModule):
 
     async def _vision_request(self, images: list, context_note: str, user_id: int = 0) -> str:
         """真正调用 DeepSeek 视觉接口~"""
-        content = self._build_user_content(images, context_note)
+        # base64 编码几十 MB 图片是纯 CPU 活，放线程里做，别卡事件循环
+        content = await asyncio.to_thread(self._build_user_content, images, context_note)
         if len(content) <= 1:
             return "呜… 这些文件小南一个都读不出来呢(｡•́︿•̀｡)"
 
@@ -643,7 +730,8 @@ class MediaParser(BaseModule):
             "Content-Type": "application/json",
         }
 
-        proxy = get_proxy_url() or None
+        # async 版本：直接调 get_proxy_url() 重新探测时会同步阻塞 1.5 秒
+        proxy = await get_proxy_url_async() or None
         timeout = aiohttp.ClientTimeout(total=180, connect=30)
 
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
@@ -733,11 +821,19 @@ class MediaParser(BaseModule):
             self._settings.get("max_frames", DEFAULT_MAX_FRAMES), DEFAULT_MAX_FRAMES
         )
 
+        # 视觉模型名来自 config.py，属于**可变内容**：写成 deepseek_flash、
+        # 或者手滑带了反引号/星号都很常见。原来这里用 parse_mode="Markdown"
+        # 把模型名包在反引号里，只要它本身带一个 ` ，代码段就闭合不了，
+        # Telegram 会直接 BadRequest（Can't parse entities）把**整条状态页**
+        # 拒收 —— 用户连 /media 都打不开，还看不出原因。
+        # 状态页没有必须加粗/段落的排版需求，这里改成纯文本，最稳。
+        model_name = str(VISION_MODEL or "").strip() or "（未配置）"
+
         lines = [
             "🎬 媒体解析状态~",
             "",
             f"├─ 功能开关：{'✅ 已开启' if enabled else '⛔ 已关闭'}",
-            f"├─ 视觉模型：`{VISION_MODEL}`",
+            f"├─ 视觉模型：{model_name}",
             f"├─ ffmpeg：{'✅ 可用（支持视频抽帧）' if self._ffmpeg else '❌ 未安装（视频只能看封面）'}",
             f"├─ 视频抽帧数：最多 {max_frames} 帧",
             f"└─ 调用间隔：{cooldown} 秒",
@@ -749,9 +845,9 @@ class MediaParser(BaseModule):
             lines.append("\n⚠️ 你目前不在白名单里，暂时用不了这个功能哦~")
 
         if not self._ffmpeg:
-            lines.append("\n💡 想让小南看懂视频，先装 ffmpeg：\n`winget install Gyan.FFmpeg`")
+            lines.append("\n💡 想让小南看懂视频，先装 ffmpeg：\nwinget install Gyan.FFmpeg")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines))
 
     async def media_on_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/media_on - 开启媒体解析（仅主人）~"""

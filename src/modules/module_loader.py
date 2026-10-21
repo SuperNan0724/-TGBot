@@ -130,7 +130,9 @@ class ModuleLoader:
                 logger.info(f"✅ 模块 '{module_name}' 加载成功~ ✨")
                 
             except Exception as e:
-                logger.error(f"❌ 加载模块 '{module_name}' 失败啦: {e}")
+                # exc_info=True：模块加载失败时，只打一行 str(e) 根本看不出是哪一行炸的。
+                # 之前排查过"模块整块静默失效"，就是因为这里没留堆栈。
+                logger.error(f"❌ 加载模块 '{module_name}' 失败啦: {e}", exc_info=True)
                 failed_modules.append((module_name, str(e)))
                 if module_name in ESSENTIAL_MODULES:
                     raise RuntimeError(f"不可缺失模块 '{module_name}' 加载失败，机器人无法启动！{e}")

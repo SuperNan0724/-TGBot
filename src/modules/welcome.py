@@ -108,6 +108,13 @@ class Welcome(BaseModule):
         self._used_indices = {}
         # 记录已发送的欢迎消息，用于自动删除
         self._welcome_messages = {}
+        # 自动删除任务要留个强引用：asyncio 只保存任务的弱引用，
+        # 创建完就不管的任务可能在睡着的时候被 GC 掉，消息永远删不掉
+        self._delete_tasks = set()
+    
+    # _used_indices 是按群存的，机器人进过的群越多这张表越长（群被移出白名单
+    # 也不会自动消失），所以给个上限，超过就丢掉最早记录的那个群
+    MAX_TRACKED_CHATS = 500
     
     def register_handlers(self, application):
         """注册处理器~"""
@@ -161,12 +168,14 @@ class Welcome(BaseModule):
             }
             
             # 2分钟后删除
-            asyncio.create_task(self._auto_delete_message(
+            task = asyncio.create_task(self._auto_delete_message(
                 context.bot,
                 chat_id,
                 msg.message_id,
                 delay=120  # 2分钟
             ))
+            self._delete_tasks.add(task)
+            task.add_done_callback(self._on_delete_task_done)
             
             logger.info(f"🎉 欢迎 {name}({user_id}) 加入群聊 {chat_id}")
     
@@ -174,6 +183,10 @@ class Welcome(BaseModule):
         """获取一条不重复的欢迎语~"""
         # 获取该群已使用的索引
         if chat_id not in self._used_indices:
+            # 群太多时别让这张表无限长：丢掉最早记录的那个群
+            if len(self._used_indices) >= self.MAX_TRACKED_CHATS:
+                first_chat = next(iter(self._used_indices))
+                self._used_indices.pop(first_chat, None)
             self._used_indices[chat_id] = set()
         
         used = self._used_indices[chat_id]
@@ -202,11 +215,28 @@ class Welcome(BaseModule):
             await bot.delete_message(chat_id=chat_id, message_id=message_id)
             logger.info(f"🗑️ 已自动删除欢迎消息 {message_id}")
         except Exception as e:
-            # 消息可能已经被手动删除，忽略错误
-            logger.debug(f"自动删除欢迎消息失败（可能已被手动删除）: {e}")
+            # 消息可能已经被手动删除、或者机器人被踢出群了：失败不算致命，
+            # 但**不能**像以前那样只记 debug —— 默认日志级别下等于没记录，
+            # 出问题时完全看不出"自动删除其实一条都没成功"。
+            logger.warning(f"🗑️ 自动删除欢迎消息 {message_id} 失败（群 {chat_id}）：{e}")
         finally:
             # 清理记录
             self._welcome_messages.pop(message_id, None)
+    
+    def _on_delete_task_done(self, task):
+        """自动删除任务的收尾：释放引用，异常绝不静默丢掉~
+
+        _auto_delete_message 自己会兜住删除失败的异常，但任务在别处炸掉
+        （比如被取消之外的意外）时没人回收 exception，asyncio 只会打印一句
+        "Task exception was never retrieved"，这里显式记下来。
+        """
+        self._delete_tasks.discard(task)
+        if task.cancelled():
+            logger.debug("🗑️ 自动删除任务被取消（机器人正在关闭？）")
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(f"🗑️ 自动删除任务异常退出：{exc!r}")
     
     def get_help_text(self) -> str:
         """返回帮助文本~"""

@@ -50,23 +50,27 @@ class System(BaseModule):
         user = update.effective_user
         user_name = user.first_name or "小可爱"
         
-        # 检查是否有验证码需要处理
-        from .admin import _confirm_codes
-        if context.args and context.args[0] in _confirm_codes:
-            code = context.args[0]
-            owner_id = _confirm_codes.get(code)
-            if owner_id == user.id:
+        # 验证码走 admin.py 里唯一的那个校验入口（consume_confirm_code）：
+        # 命中的码当场被消费掉，没命中就当普通 /start 处理。
+        # 以前这里自己 import 了 admin 的 _confirm_codes 再 get/del 一遍，
+        # 和 admin 的 /reset_system <code> 各写一套判断——两边的规则（比如
+        # 新加的过期时间、次数上限）只能靠人肉同步，迟早漂移成"一个通道能
+        # 兑现过期的码、另一个不能"。现在两条通道共用同一份代码。
+        from .admin import consume_confirm_code
+        if context.args:
+            result = consume_confirm_code(context.args[0], user.id)
+            if result == "ok":
                 self.dm.reset_system()
-                del _confirm_codes[code]
                 await update.message.reply_text(
                     "🔄 小南已彻底翻新完成！✨\n\n"
                     "所有数据都已清除，小南现在焕然一新啦~\n"
                     "重新开始吧！喵！(｡♥‿♥｡)"
                 )
                 return
-            else:
+            if result == "not_owner":
                 await update.message.reply_text("❌ 验证码错误哦~ 你不是发起这个操作的主人呢！")
                 return
+            # "missing"：不是验证码，当成普通 /start 继续往下走
         
         welcome_text = (
             f"😺 嗨嗨~ {user_name}！\n\n"
@@ -83,6 +87,11 @@ class System(BaseModule):
     
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/status - 查看状态喵"""
+        # 频道里发命令时 update.message 是 None（消息在 channel_post 里），
+        # 直接 reply_text 会 AttributeError；这个命令谁的权限都要不，所以
+        # 以前是真会炸的，这里和其它命令一样先挡掉频道
+        if self._skip_channel(update):
+            return
         uptime_seconds = int(time.time() - self.start_time)
         uptime_str = self._format_uptime(uptime_seconds)
         stats = self.dm.get_stats()

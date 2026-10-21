@@ -12,7 +12,9 @@
 import logging
 import json
 import os
+import re
 import random
+import hashlib
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,6 +27,94 @@ logger = logging.getLogger(__name__)
 
 # 贴纸收藏数据文件
 STICKER_FILE = "data/stickers.json"
+
+# 收藏库总量上限~
+#
+# 为什么要有上限：以前谁都能一直 /add_sticker、一直导入贴纸集，stickers.json
+# 只增不减——文件越长，每次 /sticker_list、每个贴纸消息的 random.choice 前
+# 都要把整份 JSON 读进内存解析一遍；/sticker_list 的翻页也会翻到几万页，
+# 删除菜单更是每页都要重读一遍。收藏库是主人一个人的（命令仅主人可用），
+# 所以"每人上限"就等于"总量上限"。
+#
+# 500 这个数是怎么来的：Telegram 一个满编静态贴纸集是 120 张（动态/视频集 50 张），
+# 500 张够放 4 个满编集，日常够用；按每条约 250 字节算文件最大约 150KB，
+# 读一次仍然是毫秒级，/sticker_list 也才 100 页（每页 5 个）。
+MAX_STICKERS_TOTAL = 500
+
+# callback_data 里用的稳定标识：file_id 的短哈希（10 位十六进制 = 40 bit）
+# Telegram 规定 callback_data ≤ 64 字节，而 file_id 本身就有 60~80 字节，塞不进去。
+_SID_RE = re.compile(r"^[0-9a-f]{10}$")
+
+
+def _sticker_sid(file_id) -> str:
+    """给一张贴纸算稳定短标识，专门用来在按钮里指认"是哪一张"~
+
+    为什么不用"全局索引"：索引只是"当前列表里的第几个"。两个窗口/两个人先后
+    打开同一个删除页时，中间只要有人增删过贴纸，同一个索引就指向了另一张，
+    点"删除 #3"会删掉第 3 个位置上的**别的**贴纸——删错东西，且删掉就没了。
+    短哈希是内容标识：按钮永远只对应"这一张"，它已经被删掉时只会提示
+    "已经不存在了"，绝不会误删别的贴纸。
+
+    40 bit 够不够：收藏库上限 500 张，两两碰撞概率约 500²/2^41 ≈ 6e-8，
+    实际等于不会发生；真撞了也只是可能删掉哈希相同的另一张，概率可忽略。
+    """
+    return hashlib.sha1(str(file_id).encode("utf-8")).hexdigest()[:10]
+
+
+def _make_sticker(sticker, fallback_set_name: str = "未知") -> dict:
+    """把一张 Telegram 贴纸规整成字段齐全的字典~
+
+    导入路径和 /add_sticker 以前各自手拼字典，漏字段（比如 set_name）时，
+    以后 /sticker_list 或随机回复里就是 KeyError；file_id 不是字符串时
+    `s["file_id"][:20]` 还会直接 TypeError。所有写入路径统一走这里，
+    拿不到 file_id 就返回 {}，让调用方跳过、不写进收藏库喵~
+    """
+    file_id = getattr(sticker, "file_id", None)
+    if not isinstance(file_id, str) or not file_id:
+        return {}
+
+    set_name = getattr(sticker, "set_name", None)
+    if not isinstance(set_name, str) or not set_name:
+        set_name = fallback_set_name
+
+    emoji = getattr(sticker, "emoji", None)
+    if not isinstance(emoji, str):
+        emoji = ""
+
+    def _int_attr(name: str) -> int:
+        value = getattr(sticker, name, 0)
+        return value if isinstance(value, int) else 0
+
+    return {
+        "file_id": file_id,
+        "sid": _sticker_sid(file_id),
+        "set_name": set_name,
+        "emoji": emoji,
+        "width": _int_attr("width"),
+        "height": _int_attr("height"),
+        "is_animated": bool(getattr(sticker, "is_animated", False)),
+        "is_video": bool(getattr(sticker, "is_video", False)),
+        "added_at": datetime.now().isoformat(),
+    }
+
+
+def _entry_sid(entry: dict) -> str:
+    """取一条已收藏贴纸的短标识（老数据没有 sid 字段就用 file_id 现算）~"""
+    sid = entry.get("sid")
+    if isinstance(sid, str) and _SID_RE.match(sid):
+        return sid
+    return _sticker_sid(entry.get("file_id", ""))
+
+
+def _short_set_name(name, limit: int = 40) -> str:
+    """贴纸集名字的显示版~
+
+    正常贴纸集名是 Telegram 给的、很短；但数据文件被手改过（或者老版本写进来的）
+    可能是超长字符串，10 个条目一拼就能把 /sticker_list、删除菜单顶过 4096 字的
+    Telegram 单条上限，整条消息被拒。这里统一截断。
+    """
+    text = name if isinstance(name, str) and name else "未知"
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _load_stickers() -> dict:
@@ -46,18 +136,31 @@ def _load_stickers() -> dict:
     stickers = data.get("stickers")
     if not isinstance(stickers, list):
         stickers = []
+    # file_id 必须是**非空字符串**：以前只判断 `s.get("file_id")` 是否为真，
+    # 手改成数字 123 也能过关，然后 s["file_id"][:20] 直接 TypeError 炸掉整个列表
     data["stickers"] = [
-        s for s in stickers if isinstance(s, dict) and s.get("file_id")
+        s for s in stickers
+        if isinstance(s, dict) and isinstance(s.get("file_id"), str) and s["file_id"]
     ]
     return data
 
 
 def _save_stickers(data: dict):
-    """保存贴纸收藏库~"""
+    """保存贴纸收藏库~
+
+    先写同目录临时文件、再 os.replace 原子替换：
+    旧写法 open("w") 会立刻把原文件清空，写到一半断电/进程被杀，stickers.json
+    就变成半截 JSON——下次 _load_stickers 解析失败、返回空列表，主人会以为
+    "收藏全没了"（其实只是文件坏了）。原子替换下最坏情况是保留上一次的完整内容。
+    """
     try:
-        os.makedirs(os.path.dirname(STICKER_FILE), exist_ok=True)
-        with open(STICKER_FILE, "w", encoding="utf-8") as f:
+        parent = os.path.dirname(STICKER_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = f"{STICKER_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, STICKER_FILE)
         return True
     except Exception as e:
         logger.error(f"保存贴纸数据失败: {e}")
@@ -356,27 +459,30 @@ class StickerModule(BaseModule):
             
             # 加载现有收藏
             stickers_data = _load_stickers()
-            existing_ids = {s["file_id"] for s in stickers_data["stickers"]}
-            
+            existing_ids = {s.get("file_id") for s in stickers_data["stickers"]}
+
             # 统计信息
             added_count = 0
             skip_count = 0
-            
+            over_count = 0
+            # 收藏库还剩多少空位（老数据已经超上限时 room=0，一个都不再导入）
+            room = max(0, MAX_STICKERS_TOTAL - len(stickers_data["stickers"]))
+
             for sticker in stickers:
                 if sticker.file_id in existing_ids:
                     skip_count += 1
                     continue
-                
-                new_sticker = {
-                    "file_id": sticker.file_id,
-                    "set_name": sticker.set_name or set_name,
-                    "emoji": sticker.emoji or "",
-                    "width": sticker.width,
-                    "height": sticker.height,
-                    "is_animated": sticker.is_animated,
-                    "is_video": sticker.is_video,
-                    "added_at": datetime.now().isoformat(),
-                }
+
+                # 上限到了就停下并计数，而不是把整份贴纸集硬塞进文件里
+                if added_count >= room:
+                    over_count += 1
+                    continue
+
+                new_sticker = _make_sticker(sticker, sticker.set_name or set_name)
+                if not new_sticker:
+                    # 字段不全（拿不到 file_id）的贴纸不写进收藏库，免得以后 KeyError
+                    continue
+
                 stickers_data["stickers"].append(new_sticker)
                 existing_ids.add(sticker.file_id)
                 added_count += 1
@@ -399,9 +505,16 @@ class StickerModule(BaseModule):
             
             if skip_count > 0:
                 result_msg += f"⏭️ 已存在跳过：{skip_count} 个\n"
+
+            if over_count > 0:
+                result_msg += (
+                    f"⚠️ 收藏库已满（上限 {MAX_STICKERS_TOTAL} 个），"
+                    f"还有 {over_count} 个没能导入~\n"
+                    f"先用 /sticker_list → 🗑️ 删除贴纸 腾位置，再重新发链接吧~\n"
+                )
             
             result_msg += (
-                f"📊 当前共收藏：{len(stickers_data['stickers'])} 个贴纸\n\n"
+                f"📊 当前共收藏：{len(stickers_data['stickers'])}/{MAX_STICKERS_TOTAL} 个贴纸\n\n"
                 f"查看收藏：/sticker_list"
             )
             
@@ -458,15 +571,21 @@ class StickerModule(BaseModule):
             # 有收藏的贴纸，随机选一个回复
             chosen = random.choice(stickers)
             try:
-                await update.message.reply_sticker(chosen["file_id"])
+                await update.message.reply_sticker(chosen.get("file_id"))
                 return
             except Exception as e:
                 logger.warning(f"回复贴纸失败（可能已失效），尝试下一个: {e}")
-                # 如果失败，尝试其他贴纸
-                remaining = [s for s in stickers if s["file_id"] != chosen["file_id"]]
+                # 如果失败，换几张试试。这里只再试 3 张：
+                # 以前是对整个收藏库逐张重试，库无限增长 + 贴纸全失效时，
+                # 一次贴纸消息就会打出一长串失败请求（很快撞上 Telegram 429 限流），
+                # 用户还得等半天才收到文字回复。收藏库上限 500 之后同理，不能全试。
+                remaining = [
+                    s for s in stickers
+                    if s.get("file_id") != chosen.get("file_id")
+                ][:3]
                 for s in remaining:
                     try:
-                        await update.message.reply_sticker(s["file_id"])
+                        await update.message.reply_sticker(s.get("file_id"))
                         return
                     except Exception:
                         continue
@@ -517,28 +636,32 @@ class StickerModule(BaseModule):
         # 检查是否已收藏
         stickers_data = _load_stickers()
         for s in stickers_data["stickers"]:
-            if s["file_id"] == sticker.file_id:
+            if s.get("file_id") == sticker.file_id:
                 await update.message.reply_text("😅 这个贴纸已经在收藏库里啦~")
                 return
-        
-        # 添加到收藏库
-        new_sticker = {
-            "file_id": sticker.file_id,
-            "set_name": sticker.set_name or "未知",
-            "emoji": sticker.emoji or "",
-            "width": sticker.width,
-            "height": sticker.height,
-            "is_animated": sticker.is_animated,
-            "is_video": sticker.is_video,
-            "added_at": datetime.now().isoformat(),
-        }
+
+        # 上限检查：满了就明确告诉主人，而不是继续往文件里堆
+        # （以前没有任何上限，一个人能一直收藏，stickers.json 无限变长）
+        if len(stickers_data["stickers"]) >= MAX_STICKERS_TOTAL:
+            await update.message.reply_text(
+                f"📦 收藏库满啦！最多只能收藏 {MAX_STICKERS_TOTAL} 个贴纸~\n"
+                f"📊 当前：{len(stickers_data['stickers'])}/{MAX_STICKERS_TOTAL}\n\n"
+                f"先腾个位置吧：/sticker_list → 🗑️ 删除贴纸"
+            )
+            return
+
+        # 添加到收藏库（字段统一由 _make_sticker 补齐，保证 file_id/sid/set_name 等都在）
+        new_sticker = _make_sticker(sticker)
+        if not new_sticker:
+            await update.message.reply_text("😅 这个贴纸信息不完整，小南存不下呢… 换个贴纸试试？")
+            return
         stickers_data["stickers"].append(new_sticker)
         
         if _save_stickers(stickers_data):
             await update.message.reply_text(
                 f"✅ 贴纸已收藏！\n"
-                f"📦 贴纸集：{sticker.set_name or '未知'}\n"
-                f"📊 当前共收藏 {len(stickers_data['stickers'])} 个贴纸~\n\n"
+                f"📦 贴纸集：{new_sticker.get('set_name', '未知')}\n"
+                f"📊 当前共收藏 {len(stickers_data['stickers'])}/{MAX_STICKERS_TOTAL} 个贴纸~\n\n"
                 f"查看收藏：/sticker_list"
             )
         else:
@@ -562,7 +685,10 @@ class StickerModule(BaseModule):
         
         # 分页显示（每页5个）
         # 用 isdecimal 而不是 isdigit：'²'.isdigit() 为 True 但 int('²') 会 ValueError 喵~
-        page = int(context.args[0]) - 1 if context.args and context.args[0].isdecimal() else 0
+        # 另外限一下位数：Python 3.11+ 对超过 4300 位的数字字符串 int() 会抛 ValueError，
+        # 而 isdecimal() 对它照样返回 True（/sticker_list 999…9 就能把命令点崩）
+        page_arg = context.args[0] if context.args else ""
+        page = int(page_arg) - 1 if page_arg.isdecimal() and len(page_arg) <= 6 else 0
         per_page = 5
         total_pages = (len(stickers) + per_page - 1) // per_page
         page = max(0, min(page, total_pages - 1))
@@ -572,14 +698,14 @@ class StickerModule(BaseModule):
         page_items = stickers[start:end]
         
         msg = "🎨 小南的贴纸收藏~\n"
-        msg += f"📊 共 {len(stickers)} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
-        
+        msg += f"📊 共 {len(stickers)}/{MAX_STICKERS_TOTAL} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
+
         for i, s in enumerate(page_items, start + 1):
             emoji = s.get("emoji", "") or ""
             anim = "🎬" if s.get("is_animated") else "🖼️"
-            msg += f"{i}. {anim} {emoji} {s.get('set_name', '未知')}\n"
-            msg += f"   🆔 {s['file_id'][:20]}...\n"
-            msg += f"   🕐 {s.get('added_at', '未知')[:10]}\n\n"
+            msg += f"{i}. {anim} {emoji} {_short_set_name(s.get('set_name'))}\n"
+            msg += f"   🆔 {s.get('file_id', '')[:20]}...\n"
+            msg += f"   🕐 {str(s.get('added_at', '未知'))[:10]}\n\n"
         
         # 翻页按钮
         keyboard = []
@@ -650,15 +776,19 @@ class StickerModule(BaseModule):
         page_items = stickers[start:end]
 
         msg = "🗑️ 选择要删除的贴纸~\n"
-        msg += f"📊 共 {len(stickers)} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
+        msg += f"📊 共 {len(stickers)}/{MAX_STICKERS_TOTAL} 个贴纸 | 第 {page+1}/{total_pages} 页\n\n"
         keyboard = []
 
         for i, s in enumerate(page_items, start + 1):
             emoji = s.get("emoji", "") or ""
             anim = "🎬" if s.get("is_animated") else "🖼️"
-            msg += f"{i}. {anim} {emoji} {s.get('set_name', '未知')}\n"
+            msg += f"{i}. {anim} {emoji} {_short_set_name(s.get('set_name'))}\n"
+            # 按钮带的是这张贴纸的**稳定短标识**（file_id 的短哈希），不是"第几个"。
+            # 所以就算两个窗口里的列表已经不一样了，点"删除 #3"删掉的也永远是
+            # #3 当时对应的那一张，不会变成别人列表里的第 3 个喵~
+            sid = _entry_sid(s)
             keyboard.append([
-                InlineKeyboardButton(f"🗑️ 删除 #{i}", callback_data=f"sticker_del_{i-1}")
+                InlineKeyboardButton(f"🗑️ 删除 #{i}", callback_data=f"sticker_del_{sid}")
             ])
 
         # 翻页按钮（和 /sticker_list 一样排成一排）
@@ -687,8 +817,9 @@ class StickerModule(BaseModule):
         if data.startswith("sticker_list_"):
             # callback_data 是客户端发上来的，被改造过就是任意字符串，
             # 直接 int() 会 ValueError 冲出 handler，所以先校验再转
+            # （位数也要卡：4300 位以上的数字串 isdecimal() 为 True 但 int() 会抛错）
             suffix = data[len("sticker_list_"):]
-            if not suffix.isdecimal():
+            if not suffix.isdecimal() or len(suffix) > 6:
                 await query.answer("页码不对哦~", show_alert=False)
                 return
             page = int(suffix)
@@ -699,31 +830,43 @@ class StickerModule(BaseModule):
         elif data.startswith("sticker_show_delete"):
             # 页码藏在按钮数据里：sticker_show_delete_<页>，取不到就是第一页
             page_suffix = data[len("sticker_show_delete"):]
-            page = int(page_suffix[1:]) if page_suffix.startswith("_") and page_suffix[1:].isdecimal() else 0
+            page_digits = page_suffix[1:] if page_suffix.startswith("_") else ""
+            page = int(page_digits) if page_digits.isdecimal() and len(page_digits) <= 6 else 0
             await self._show_delete_page(query, page)
         
-        # 执行删除
+        # 执行删除（按稳定短标识删，不按位置删）
         elif data.startswith("sticker_del_"):
-            index_text = data[len("sticker_del_"):]
-            if not index_text.isdecimal():
-                await query.edit_message_text("😅 这个操作已经失效了，重新打开收藏列表试试~")
+            sid = data[len("sticker_del_"):]
+            if not _SID_RE.match(sid):
+                # 老消息里的按钮带的是数字编号（升级前的格式），一律当作已失效：
+                # 宁可让主人重开一次列表，也不能拿旧编号去删现在这个位置上的贴纸
+                await query.edit_message_text(
+                    "😅 这个按钮已经过期啦（升级前的旧按钮），"
+                    "重新打开 /sticker_list → 🗑️ 删除贴纸 就好~"
+                )
                 return
-            index = int(index_text)
             stickers_data = _load_stickers()
-            
-            if 0 <= index < len(stickers_data["stickers"]):
-                removed = stickers_data["stickers"].pop(index)
-                if _save_stickers(stickers_data):
-                    await query.edit_message_text(
-                        f"✅ 已删除贴纸~\n"
-                        f"📦 {removed.get('set_name', '未知')}\n"
-                        f"📊 剩余 {len(stickers_data['stickers'])} 个贴纸\n\n"
-                        f"查看收藏：/sticker_list"
-                    )
-                else:
-                    await query.edit_message_text("❌ 删除失败啦…")
+
+            target_index = None
+            for idx, s in enumerate(stickers_data["stickers"]):
+                if _entry_sid(s) == sid:
+                    target_index = idx
+                    break
+
+            if target_index is None:
+                await query.edit_message_text("😅 这个贴纸已经不在了呢~ 可能刚才已经删掉啦")
+                return
+
+            removed = stickers_data["stickers"].pop(target_index)
+            if _save_stickers(stickers_data):
+                await query.edit_message_text(
+                    f"✅ 已删除贴纸~\n"
+                    f"📦 {_short_set_name(removed.get('set_name'))}\n"
+                    f"📊 剩余 {len(stickers_data['stickers'])}/{MAX_STICKERS_TOTAL} 个贴纸\n\n"
+                    f"查看收藏：/sticker_list"
+                )
             else:
-                await query.edit_message_text("😅 这个贴纸已经不存在了~")
+                await query.edit_message_text("❌ 删除失败啦…")
         
         # 返回列表
         elif data == "sticker_back_to_list":

@@ -69,7 +69,7 @@ git pull && docker compose up -d --build
 
 - 构建上下文是**仓库根目录**，`Dockerfile`、`docker-compose.yml`、`.dockerignore` 都在根目录
 - 镜像里**没有** `config.py`，配置全部来自 `.env`
-- 数据在 `bot-data` 卷（`/app/data`）里：白名单、付费记录、备份都在那，**别删卷**
+- 数据在 `bot-data` 卷（`/app/data`）里：白名单、用户记录、备份都在那，**别删卷**
 - 镜像自带 ffmpeg 和非 root 用户，`HEALTHCHECK` 探的是 `data/bot.pid`
 - 想用 `config.py` 而不是环境变量：取消 `docker-compose.yml` 里那行注释即可（二选一）
 
@@ -142,9 +142,7 @@ src/deploy/manage.sh stop
 注意事项：
 
 - 机器人用 **long polling**，不需要公网入口，也不用暴露端口；平台要你选"Web Service / 端口"时，只要进程能常驻即可（具体字段名以各平台当前文档为准）
-- 平台如果把空闲容器休眠（Render 免费档就是），机器人会掉线——要么选常驻实例，要么接 uptime 探活
 - **同一个 Token 只能跑一个实例**，否则 Telegram 返回 `409 Conflict`：本地和云上别同时开
-- 要走发卡平台回调（`CALLBACK_*`）才需要暴露端口；只跑机器人不需要
 - 平台时区默认 UTC，`TZ=Asia/Shanghai` 已经在镜像里设好；想改就改这个环境变量
 - 装完先跑一次自检：`python src/main.py --check`（容器里 `docker run --rm -e TELEGRAM_BOT_TOKEN=xxx <镜像> python main.py --check`）
 
@@ -161,7 +159,6 @@ src/deploy/manage.sh stop
 | `BOT_OWNER_ID` | ⬜ | 你的数字 ID（@userinfobot 查），不填主人命令不可用 |
 | `DEEPSEEK_API_KEY` | ⬜ | 不填则 AI 聊天 / 性格 / 思考 / 女友模式不可用 |
 | `PROXY_URL` | ⬜ | 国内访问 Telegram 必填 |
-| `CALLBACK_SECRET` | ⬜ | 接发卡平台才需要，且必须改成随机串 |
 | `VISION_MODEL` | ⬜ | 看图用的视觉模型，默认 `deepseek-flash` |
 | `DISABLE_THINKING` | ⬜ | `true` = 关思考（默认，省 token） |
 

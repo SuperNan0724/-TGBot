@@ -34,9 +34,25 @@ from config import (
     LINK_THIRD_PARTY_ENABLED, LINK_THIRD_PARTY_API,
     LINK_THIRD_PARTY_PLATFORMS, LINK_THIRD_PARTY_TIMEOUT,
 )
-from .net_helpers import get_proxy_url
+from .net_helpers import get_proxy_url_async
 
 logger = logging.getLogger(__name__)
+
+# 响应体上限~
+# 对方返回一个 500MB 的 JSON，"先读进来再判断"就已经 OOM 了，所以必须
+# 边读边计数、超了立刻放弃。JSON 接口给 4MB（正常响应只有几百字节），
+# 抖音的 HTML 页面给 4MB（分享页一般 100~300KB）。
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_HTML_BYTES = 4 * 1024 * 1024
+
+# 接口超时的兜底值 / 下限（配置被写成 None、0、"30s" 时用默认值）
+_DEFAULT_TIMEOUT = 30
+_MIN_TIMEOUT = 5
+
+
+class ResponseTooLarge(Exception):
+    """对方返回的响应体超过上限"""
+
 
 # 键名候选表：不同解析服务用的字段名不一样，这里列出常见的几种。
 # 顺序有意义，靠前的优先。
@@ -57,6 +73,53 @@ IMAGES_KEYS = ("images", "image_list", "imgs", "image_urls")
 def _is_usable_url(value) -> bool:
     """判断是不是一个能直接请求的 http(s) 地址~"""
     return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
+def _safe_int(value, default: int) -> int:
+    """把配置值安全地转成 int~（手写成 "30s" / None 时回落到默认值）"""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _client_timeout() -> aiohttp.ClientTimeout:
+    """
+    构造带总超时的 ClientTimeout~
+
+    `total` 覆盖**整个请求**（连接 + 等响应头 + 读完 body），不是只管连接；
+    只设 connect 的话，对方慢慢吐 body 可以一直挂着。
+    配置被改成 0/负数/字符串时 aiohttp 会直接抛异常（每次请求都超时），
+    所以这里先归一成合理的整数。
+    """
+    total = max(_MIN_TIMEOUT, _safe_int(LINK_THIRD_PARTY_TIMEOUT, _DEFAULT_TIMEOUT))
+    return aiohttp.ClientTimeout(total=total, connect=min(15, total))
+
+
+async def _read_body_capped(resp, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
+    """
+    读完响应体，超过上限立刻放弃（抛 ResponseTooLarge）~
+
+    为什么不能直接 `await resp.text()` / `await resp.json()`？
+      aiohttp 只会按"耗时"超时，不管"体积"。对方返回一个巨大的 JSON 时，
+      这行代码会先把几 GB 读进内存，然后才轮到我们判断 —— 结果是 OOM。
+      Content-Length 也不一定给（chunked），所以必须按**实际读到的字节数**卡。
+    """
+    length = resp.headers.get("Content-Length")
+    if length and length.isdigit() and int(length) > max_bytes:
+        raise ResponseTooLarge(f"Content-Length {int(length)} 超过上限 {max_bytes}")
+
+    chunks = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        total += len(chunk)
+        if total > max_bytes:
+            # 已经读到的部分直接丢掉，别继续往内存里堆
+            raise ResponseTooLarge(f"响应体超过上限 {max_bytes} 字节")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _deep_find_text(obj, keys, max_depth=8):
@@ -293,9 +356,15 @@ def _is_success_code(code) -> bool:
       错误提示（msg）就这么丢了，上层只剩一句含糊的"接口没有返回媒体地址"，
       用户根本看不出是链接失效还是服务挂了。
     这里按**类型**分支判断，不让 bool 和 int 隐式相等。
+
+    ⚠️ None 一律算**失败**。
+      调用方只应该在"**键根本不存在**"时跳过判断（用 _MISSING 哨兵），
+      而不是把 None 当"没有错误码"。实测有的服务失败时返回
+          {"code": null, "msg": "失败"}
+      —— 以前它被当成成功，于是 msg 被丢掉、继续拿残缺的 data 去发媒体。
     """
     if code is None:
-        return True
+        return False
     if isinstance(code, bool):
         # bool 是 int 的子类，这个分支必须排在 int 前面
         return code is True
@@ -304,6 +373,10 @@ def _is_success_code(code) -> bool:
     if isinstance(code, str):
         return code.strip() in ("", "0", "200")
     return False
+
+
+# 哨兵：区分"键不存在"（跳过业务码检查）和"键存在但值是 null"（算失败）
+_MISSING = object()
 
 
 async def parse(url: str, platform_label: str = ""):
@@ -333,38 +406,48 @@ async def parse(url: str, platform_label: str = ""):
         return None
 
     api_url = LINK_THIRD_PARTY_API.format(url=quote(url, safe=""))
-    proxy = get_proxy_url() or None
+    # async 版本：直接调 get_proxy_url() 重新探测时会同步阻塞 1.5 秒
+    proxy = await get_proxy_url_async() or None
     headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/126.0 Safari/537.36"),
         "Accept": "application/json, text/plain, */*",
     }
-    timeout = aiohttp.ClientTimeout(total=LINK_THIRD_PARTY_TIMEOUT, connect=15)
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async with aiohttp.ClientSession(timeout=_client_timeout(), trust_env=True) as session:
             async with session.get(api_url, headers=headers, proxy=proxy) as resp:
                 if resp.status != 200:
                     logger.warning(f"第三方接口返回 HTTP {resp.status}")
                     return None
-                raw = await resp.json(content_type=None)
+                # 体积上限在这里生效：超了直接放弃，不会把巨大 JSON 读进内存
+                body = await _read_body_capped(resp)
+    except ResponseTooLarge as e:
+        logger.warning(f"第三方接口响应过大，已拒绝: {e}")
+        return None
     except aiohttp.ClientError as e:
         logger.warning(f"第三方接口请求失败: {type(e).__name__}: {e}")
-        return None
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"第三方接口返回的不是合法 JSON: {e}")
         return None
     except Exception as e:
         logger.warning(f"第三方接口异常: {type(e).__name__}: {e}")
         return None
 
+    # 非 JSON 响应（风控页/HTML 错误页）在这里被挡掉，不会再抛到上层
+    try:
+        raw = json.loads(body)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"第三方接口返回的不是合法 JSON: {e}")
+        return None
+
     # 接口自身的错误码（各家不一样，常见的 code/status/ret）
     if isinstance(raw, dict):
-        code = raw.get("code", raw.get("status", raw.get("ret")))
-        if not _is_success_code(code):
+        # 用哨兵而不是默认 None：键不存在 = 跳过检查，
+        # 键存在但值是 null = 明确失败（`{"code": null, "msg": "失败"}`）
+        code = raw.get("code", raw.get("status", raw.get("ret", _MISSING)))
+        if code is not _MISSING and not _is_success_code(code):
             msg = raw.get("msg") or raw.get("message") or raw.get("error") or ""
-            logger.info(f"第三方接口返回错误码 {code}: {msg}")
+            logger.info(f"第三方接口返回错误码 {code!r}: {msg}")
             # 把接口的原始提示带出去，方便用户判断是链接失效还是服务挂了
             raise ThirdPartyError(str(msg) or f"接口返回 code={code}")
 
@@ -436,10 +519,9 @@ async def _douyin_resolve_aweme_id(url: str):
     短链会 302 到形如 https://www.douyin.com/video/7123456789012345678
     """
     headers = _douyin_headers()
-    proxy = get_proxy_url() or None
-    timeout = aiohttp.ClientTimeout(total=30, connect=15)
+    proxy = await get_proxy_url_async() or None
     try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async with aiohttp.ClientSession(timeout=_client_timeout(), trust_env=True) as session:
             async with session.get(url, headers=headers, proxy=proxy,
                                    allow_redirects=True) as resp:
                 final = str(resp.url)
@@ -448,8 +530,8 @@ async def _douyin_resolve_aweme_id(url: str):
                 if m:
                     return m.group(1)
 
-                # 没带 ID 就翻页面源码找
-                body = await resp.text(errors="replace")
+                # 没带 ID 就翻页面源码找（页面可能几百 KB，同样卡体积上限）
+                body = (await _read_body_capped(resp, MAX_HTML_BYTES)).decode("utf-8", "replace")
                 m = AWEME_ID_RE.search(body)
                 if m:
                     return m.group(1)
@@ -480,16 +562,16 @@ async def _douyin_fetch_detail(aweme_id: str):
            f"?aweme_id={aweme_id}&device_platform=webapp&aid=6383&channel=channel_pc_web")
     headers = _douyin_headers()
     headers["Accept"] = "application/json, text/plain, */*"
-    proxy = get_proxy_url() or None
-    timeout = aiohttp.ClientTimeout(total=30, connect=15)
+    proxy = await get_proxy_url_async() or None
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async with aiohttp.ClientSession(timeout=_client_timeout(), trust_env=True) as session:
             async with session.get(api, headers=headers, proxy=proxy) as resp:
                 if resp.status != 200:
                     logger.warning(f"抖音详情接口 HTTP {resp.status}")
                     return None
-                text = await resp.text(errors="replace")
+                body = await _read_body_capped(resp, MAX_RESPONSE_BYTES)
+                text = body.decode("utf-8", "replace")
                 if "ArgusSecurityPlugin" in text or "Uifid Not Found" in text:
                     raise ThirdPartyError(
                         "抖音风控拦截（ArgusSecurityPlugin 要求 Uifid）——"

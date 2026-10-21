@@ -4,6 +4,7 @@
 import logging
 import random
 import string
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,13 +14,66 @@ from .data_manager import DataManager
 
 logger = logging.getLogger(__name__)
 
-# 存储验证码 {code: owner_id}
+# 存储验证码 {code: (owner_id, 生成时间戳)}
+#
+# 以前是纯 dict {code: owner_id}：每发一次 /reset_system 就塞一个进去，
+# 不确认、不清理就永远不删，长期跑着的机器人内存只涨不跌。
+# 现在每个码都带过期时间，并且整张表有数量上限。
 _confirm_codes = {}
+
+# 验证码有效期（秒）：15 分钟够主人复制粘贴过来，又不会长期挂着没人管
+_CONFIRM_CODE_TTL = 15 * 60
+# 同时最多保留几个没用掉的验证码：超出就把最早的那个挤出去
+_CONFIRM_CODE_MAX = 5
 
 
 def _generate_code(length=6):
     """生成验证码~"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+
+def _purge_expired_codes():
+    """清掉已经过期的验证码~"""
+    now = time.time()
+    for code, (_, created_at) in list(_confirm_codes.items()):
+        if now - created_at > _CONFIRM_CODE_TTL:
+            _confirm_codes.pop(code, None)
+
+
+def _issue_confirm_code(owner_id: int) -> str:
+    """生成并登记一个验证码（先清理过期的，再保证不超上限）~"""
+    _purge_expired_codes()
+    # 上限：一直点 /reset_system 却不确认，也不会把这张表撑大
+    while len(_confirm_codes) >= _CONFIRM_CODE_MAX:
+        oldest = min(_confirm_codes, key=lambda c: _confirm_codes[c][1])
+        _confirm_codes.pop(oldest, None)
+    code = _generate_code()
+    # 极低概率撞码：绝不覆盖掉还没用掉的验证码
+    while code in _confirm_codes:
+        code = _generate_code()
+    _confirm_codes[code] = (owner_id, time.time())
+    return code
+
+
+def consume_confirm_code(code: str, user_id: int) -> str:
+    """验证码的**唯一**校验入口~
+
+    返回 "ok" / "missing" / "not_owner"，只有 "ok" 会把码消费掉（pop），
+    所以同一个码不可能被兑现两次。
+
+    admin 的 /reset_system <code> 和 system 的 /start <code> 都走这一个函数：
+    以前两边各自 get/del 一遍这张表，规则一改就会漂移（比如加了过期时间
+    只有一边生效，另一边照样能兑现过期的码）。
+    """
+    _purge_expired_codes()
+    entry = _confirm_codes.get(code)
+    if entry is None:
+        return "missing"
+    owner_id, _ = entry
+    if owner_id != user_id:
+        return "not_owner"
+    _confirm_codes.pop(code, None)
+    return "ok"
 
 
 class Admin(BaseModule):
@@ -266,8 +320,17 @@ class Admin(BaseModule):
             msg += f"⭐ 主人：{BOT_OWNER_ID}\n"
         if admins:
             msg += f"共有 {len(admins)} 位管理员~\n"
+            # 管理员多了会把文案顶过 Telegram 的 4096 字上限，整条消息都发不出去；
+            # 这里留出余量，显示不下就只显示前面一部分并说明还有多少
+            shown = 0
             for admin_id in admins:
-                msg += f"  • {admin_id}\n"
+                line = f"  • {admin_id}\n"
+                if len(msg) + len(line) + 60 > 4096:
+                    break
+                msg += line
+                shown += 1
+            if shown < len(admins):
+                msg += f"  …还有 {len(admins) - shown} 位没显示呢~（太长啦，先看到这里喵）\n"
         else:
             msg += "还没有管理员呢~ 用 /add_admin 添加吧！"
         
@@ -277,7 +340,18 @@ class Admin(BaseModule):
         """错误详细报告~"""
         if not self._check_owner(update, context):
             return
-        limit = int(context.args[0]) if context.args and context.args[0].isdigit() else 10
+        # 光看 .isdigit() 不够：'²'、上标数字这类字符 .isdigit() 也返回 True，
+        # 但 int('²') 会抛 ValueError，整个命令直接崩掉（用户只看到没反应）。
+        # 加 isascii() 只认 0-9，再限制位数——5000 个 '9' 同样能过 isdigit()，
+        # 而 Python 3.11+ 的 int() 在 4300 位时会抛 ValueError。
+        # 最后夹到 1~100（数据本身最多只留 100 条），免得 /error_detail 0
+        # 变成 [-0:] 反而把全部错误都列出来。
+        limit = 10
+        if context.args:
+            raw = context.args[0]
+            if raw.isascii() and raw.isdigit() and len(raw) <= 6:
+                limit = int(raw)
+        limit = min(max(limit, 1), 100)
         errors = self.dm.get_errors(limit)
         
         if not errors:
@@ -416,19 +490,19 @@ class Admin(BaseModule):
         owner_id = update.effective_user.id
         
         # 带参数就是"确认"这一步：必须和下发的验证码一致才真的执行。
-        # 之前这里只生成验证码、从不校验（校验只写在 /start <code> 里），
-        # 命令跟自己说的"请输入验证码确认"完全对不上。
+        # 校验统一走 consume_confirm_code（和 system 的 /start <code> 是同一份实现）。
         if context.args:
-            code = context.args[0]
-            expected_owner = _confirm_codes.get(code)
-            if expected_owner is None:
-                await update.message.reply_text("😅 验证码不存在或已经用掉啦~ 重新用 /reset_system 获取一个吧！")
+            result = consume_confirm_code(context.args[0], owner_id)
+            if result == "missing":
+                await update.message.reply_text(
+                    "😅 验证码不存在、已经用掉、或者过期啦~\n"
+                    "重新用 /reset_system 获取一个吧！"
+                )
                 return
-            if expected_owner != owner_id:
+            if result == "not_owner":
                 await update.message.reply_text("❌ 验证码错误哦~ 你不是发起这个操作的主人呢！")
                 return
             self.dm.reset_system()
-            _confirm_codes.pop(code, None)
             await update.message.reply_text(
                 "🔄 小南已彻底翻新完成！✨\n\n"
                 "所有数据都已清除，小南现在焕然一新啦~\n"
@@ -436,14 +510,14 @@ class Admin(BaseModule):
             )
             return
         
-        code = _generate_code()
-        _confirm_codes[code] = owner_id
+        code = _issue_confirm_code(owner_id)
         
         await update.message.reply_text(
             f"⚠️⚠️⚠️ 彻底翻新警告！\n\n"
             f"此操作会删除所有数据，包括备份！\n"
             f"请输入验证码确认：{code}\n\n"
             f"确认方式：发送 /reset_system {code}\n"
+            f"⏰ 验证码 {_CONFIRM_CODE_TTL // 60} 分钟内有效，过期了就要重新获取喵~\n"
             f"使用 /clear_confirm_codes 可以取消此操作~"
         )
     

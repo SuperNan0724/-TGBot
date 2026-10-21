@@ -20,27 +20,53 @@ VOICE_MAX_LENGTH = 300       # 超过300字不发语音
 TELEGRAM_MAX_LEN = 4096
 
 
+def _tg_len(text: str) -> int:
+    """Telegram 按 UTF-16 码元算长度（emoji、生僻字占 2 个码元）~
+
+    直接用 len() 估算 4096 会少算一半：一条 3000 字但 emoji 很多的回复
+    实际长度可能已经 6000+，切出来的每一段都"看着没超"，发出去照样被拒。
+    """
+    if not text:
+        return 0
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _fit_prefix(text: str, limit: int) -> int:
+    """返回「按 Telegram 长度计算不超过 limit」的最长前缀的字符下标~"""
+    low, high = 0, min(len(text), limit)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _tg_len(text[:mid]) <= limit:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
 def split_text(text: str, limit: int = TELEGRAM_MAX_LEN) -> list:
     """
     把超长文本切成 Telegram 能接受的多段~
 
     优先在换行 / 句末标点处断开，避免把一句话从中间劈开。
+    长度按 UTF-16 码元算（和 Telegram 的判定一致），不是按 len()。
     """
     if not text:
         return []
-    if len(text) <= limit:
+    if _tg_len(text) <= limit:
         return [text]
 
     chunks = []
-    while len(text) > limit:
-        window = text[:limit]
+    while text and _tg_len(text) > limit:
+        window = text[:_fit_prefix(text, limit)]
         cut = window.rfind('\n')
         if cut <= 0:
             cut = max(window.rfind(ch) for ch in ('。', '！', '？', '，', '.', ' '))
             if cut > 0:
                 cut += 1  # 把句末标点留在本段末尾，不要甩到下一条消息开头
         if cut <= 0:
-            cut = limit
+            cut = len(window)
+        if cut <= 0:
+            cut = 1  # 兜底：至少要吃掉一个字符，否则这里会死循环
         piece = text[:cut].strip()
         if piece:
             chunks.append(piece)

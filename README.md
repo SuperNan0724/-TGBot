@@ -545,7 +545,6 @@ python start.py
 │   │   ├── fun.py              # 🎮 娱乐模块
 │   │   ├── sticker.py          # 🎨 贴纸模块
 │   │   ├── think.py            # 💭 思考模块
-│   │   ├── paid_whitelist.py   # 💰 付费白名单/发卡平台
 │   │   └── anime_logger.py     # 🌸 二次元日志
 │   │
 │   ├── config.example.py   📋 配置模板（复制成 config.py 再填）

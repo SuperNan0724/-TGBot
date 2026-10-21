@@ -125,12 +125,6 @@ if not errorlevel 1 (
     exit /b 1
 )
 
-findstr /C:"CHANGE_ME_TO_A_RANDOM_SECRET" "%SRC%\config.py" >nul 2>&1
-if not errorlevel 1 (
-    echo         [提示] CALLBACK_SECRET 还是默认值
-    echo                发卡平台回调服务不会启动（这是安全设计）
-    echo                不接发卡平台的话可以忽略
-)
 echo   [2/5] 配置文件  OK
 
 rem ============================================================
